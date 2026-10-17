@@ -3,7 +3,7 @@ FROM golang:1.27-trixie AS builder
 COPY src /src
 RUN go build -o /src/main /src/main.go
 
-FROM node:24-trixie AS runtime
+FROM node:24-trixie-slim AS runtime
 
 ARG YT_DLP_VERSION=2026.08.19
 
