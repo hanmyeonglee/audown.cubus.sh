@@ -99,13 +99,7 @@ func main() {
 		defer os.RemoveAll(tempDirPath)
 
 		musicDownloadPath := filepath.Join(tempDirPath, "%(title)s.%(ext)s")
-		process := "uvx"
 		args := []string{
-			"--python",
-			"3.13",
-			"--from",
-			"yt-dlp[default]",
-			"yt-dlp",
 			"-o",
 			musicDownloadPath,
 			"-x",
@@ -124,7 +118,7 @@ func main() {
 
 		args = append(args, url)
 
-		cmd := exec.Command(process, args...)
+		cmd := exec.Command("yt-dlp", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		cmdErr := cmd.Run()
