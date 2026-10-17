@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -33,7 +34,7 @@ func isUrlFormatRight(url string) bool {
 		strings.HasPrefix(url, urlFormat02)
 }
 
-var timeNotification = regexp.MustCompile(`^\d{2}:[0-5]\d:[0-5]\d$`)
+var timeNotification = regexp.MustCompile(`^\d{2,}:[0-5]\d:[0-5]\d$`)
 
 func isTimeExpressionRight(startTime string, endTime string) bool {
 	return (startTime == "" || timeNotification.MatchString(startTime)) &&
@@ -42,6 +43,9 @@ func isTimeExpressionRight(startTime string, endTime string) bool {
 
 const badRequestMsg = "잘못된 입력입니다. 다시 시도해주세요."
 const internalServerErrorMsg = "오류가 발생했습니다. 다시 시도해주세요."
+const downloadResponseCookieName = "audown-download-response"
+
+var downloadTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
 func main() {
 	slog.Info("Server start")
@@ -75,9 +79,10 @@ func main() {
 			http.Redirect(w, r, badRequestQuery, http.StatusSeeOther)
 			return
 		}
-		
+
 		startTime := r.PostForm.Get("startTime")
 		endTime := r.PostForm.Get("endTime")
+		downloadToken := r.PostForm.Get("downloadToken")
 		if !isTimeExpressionRight(startTime, endTime) {
 			slog.Error("Server Error", "error", "time expression is wrong", "startTime", startTime, "endTime", endTime)
 			http.Redirect(w, r, internalServerErrorQuery, http.StatusSeeOther)
@@ -94,10 +99,12 @@ func main() {
 		defer os.RemoveAll(tempDirPath)
 
 		musicDownloadPath := filepath.Join(tempDirPath, "%(title)s.%(ext)s")
-		process := "uv"
+		process := "uvx"
 		args := []string{
-			"run",
-			"--with=yt-dlp",
+			"--python",
+			"3.13",
+			"--from",
+			"yt-dlp[default]",
 			"yt-dlp",
 			"-o",
 			musicDownloadPath,
@@ -106,6 +113,9 @@ func main() {
 			"--no-continue",
 			"--ignore-errors",
 			"--no-playlist",
+			"--js-runtimes",
+			"node",
+			"-v",
 		}
 
 		if !(startTime == "" && endTime == "") {
@@ -115,9 +125,11 @@ func main() {
 		args = append(args, url)
 
 		cmd := exec.Command(process, args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
 		cmdErr := cmd.Run()
 		if cmdErr != nil {
-			slog.Error("Server Error", "error", cmdErr)
+			slog.Error("Server Error", "error", cmdErr, "yt-dlp stderr", stderr.String())
 			http.Redirect(w, r, internalServerErrorQuery, http.StatusSeeOther)
 			return
 		}
@@ -136,6 +148,15 @@ func main() {
 			map[string]string{"filename": musicName},
 		))
 		w.Header().Set("Content-Type", mime.TypeByExtension("mp3"))
+		if downloadTokenPattern.MatchString(downloadToken) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     downloadResponseCookieName,
+				Value:    downloadToken,
+				Path:     "/",
+				MaxAge:   60,
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
 
 		slog.Info("Music Download", "musicName", musicName)
 		http.ServeFile(w, r, musicPath)

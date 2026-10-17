@@ -27,66 +27,79 @@
                     <path d="M12 8v6" stroke="#ffffff" stroke-width="2" stroke-linecap="round"></path>
                     <circle cx="12" cy="17.5" r="1.1" fill="#ffffff"></circle>
                 </svg>
-                <svg class="form-progress-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
-                    <path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-                </svg>
                 <span class="form-error-message"></span>
             </p>
 
             <form id="download-form" action="/download" method="post">
-                <div class="form-field">
-                    <label for="url">유튜브 링크</label>
-                    <input
-                        id="url"
-                        name="url"
-                        type="url"
-                        placeholder="https://www.youtube.com/watch?v=..."
-                        autocomplete="url"
-                        required
-                    >
-                </div>
-
-                <fieldset class="time-fieldset">
-                    <legend>구간 선택 <span>선택 사항</span></legend>
-                    <div class="time-fields">
-                        <div class="form-field">
-                            <label for="startTime">시작 시간</label>
+                <div class="url-controls">
+                    <div class="form-field is-entering">
+                        <label for="url">유튜브 링크</label>
+                        <div class="url-input-wrap">
                             <input
-                                id="startTime"
-                                name="startTime"
-                                type="text"
-                                inputmode="numeric"
-                                autocomplete="off"
-                                placeholder="00:00:00"
-                                pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]"
-                                maxlength="8"
-                                aria-describedby="time-help"
+                                id="url"
+                                name="url"
+                                type="url"
+                                placeholder="https://www.youtube.com/watch?v=..."
+                                autocomplete="url"
+                                aria-describedby="form-error"
+                                required
                             >
-                        </div>
-                        <div class="form-field">
-                            <label for="endTime">종료 시간</label>
-                            <input
-                                id="endTime"
-                                name="endTime"
-                                type="text"
-                                inputmode="numeric"
-                                autocomplete="off"
-                                placeholder="00:00:00"
-                                pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]"
-                                maxlength="8"
-                                aria-describedby="time-help"
-                            >
+                            <span class="url-loading-spinner" aria-hidden="true" hidden></span>
                         </div>
                     </div>
+                    <button class="lookup-button" id="lookup-button" type="button" aria-controls="video-preview time-fieldset submit-button">
+                        <span>조회하기</span>
+                        <span class="button-arrow" aria-hidden="true">↗</span>
+                    </button>
+                </div>
+                <input id="url-submission" type="hidden" name="url" value="" disabled>
+                <input id="download-token" type="hidden" name="downloadToken" value="">
+
+                <section class="video-preview" id="video-preview" aria-labelledby="video-title" hidden>
+                    <div class="video-thumbnail-wrap" id="video-thumbnail-wrap">
+                        <img id="video-thumbnail" alt="" loading="lazy" decoding="async">
+                    </div>
+                    <div class="video-preview-copy">
+                        <p class="video-preview-label">영상 정보</p>
+                        <h2 class="video-preview-title" id="video-title"></h2>
+                    </div>
+                </section>
+
+                <fieldset class="time-fieldset" id="time-fieldset" hidden>
+                    <legend>구간 선택 <span>전체 길이 <strong id="duration-value">00:00:00</strong></span></legend>
+                    <div class="range-values">
+                        <label class="range-value" for="start-range">
+                            <span>시작</span>
+                            <output id="start-time-display" for="start-range">00:00:00</output>
+                        </label>
+                        <label class="range-value" for="end-range">
+                            <span>종료</span>
+                            <output id="end-time-display" for="end-range">00:00:00</output>
+                        </label>
+                    </div>
+                    <div class="range-slider" id="range-slider">
+                        <div class="range-track" aria-hidden="true">
+                            <div class="range-selection" id="range-selection"></div>
+                        </div>
+                        <input class="range-input" id="start-range" type="range" min="0" max="1" value="0" step="1" aria-label="시작 시간">
+                        <input class="range-input" id="end-range" type="range" min="0" max="1" value="1" step="1" aria-label="종료 시간">
+                    </div>
+                    <p class="range-help" id="range-help">양쪽 조절점을 움직여 다운로드할 구간을 선택하세요.</p>
                 </fieldset>
 
-                <button class="submit-button" type="submit">
-                    <span>노래 다운로드</span>
-                    <span class="button-arrow" aria-hidden="true">↗</span>
+                <input id="startTime" name="startTime" type="hidden" value="">
+                <input id="endTime" name="endTime" type="hidden" value="">
+
+                <button class="submit-button" id="submit-button" type="submit" hidden>
+                    <span id="submit-label">노래 다운로드</span>
+                    <span class="button-status" aria-hidden="true">
+                        <span class="button-arrow">↗</span>
+                        <span class="button-loading-spinner" hidden></span>
+                    </span>
                 </button>
             </form>
         </section>
     </main>
-    <script src="/static/js/index.js"></script>
+    <script type="module" src="/static/js/index.js"></script>
 </body>
 </html>
