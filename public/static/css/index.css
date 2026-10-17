@@ -1,0 +1,275 @@
+:root {
+    color-scheme: light;
+    font-family: Inter, Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    color: #000000;
+    background: #ffffff;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+}
+
+.page-content {
+    flex: 1;
+    width: 100%;
+    display: grid;
+    place-items: center;
+    padding: 72px 24px 84px;
+}
+
+.download-card {
+    width: min(100%, 620px);
+    padding: 52px 56px 38px;
+    border: 1px solid #000000;
+    background: #ffffff;
+    box-shadow: 9px 9px 0 #000000;
+}
+
+.eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 24px;
+    color: #ff0000;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+}
+
+.eyebrow-mark {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff0000;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    margin: 0 0 34px;
+    font-size: clamp(38px, 8vw, 54px);
+    font-weight: 900;
+    letter-spacing: -0.065em;
+    line-height: 1;
+}
+
+.brand-mark {
+    width: 54px;
+    height: 38px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    transform: translateY(2px);
+    border-radius: 10px;
+    color: #ffffff;
+    background: #ff0000;
+}
+
+.brand-mark svg {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: #ffffff;
+    stroke-width: 3.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.form-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 24px;
+    padding: 12px 14px;
+    border: 1px solid #ff0000;
+    color: #ff0000;
+    background: #ffffff;
+    font-size: 13px;
+    line-height: 1.6;
+    font-weight: bold;
+}
+
+.form-error-icon {
+    display: none;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    margin-top: 0;
+}
+
+.form-progress-icon {
+    display: none;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    margin-top: 0;
+}
+
+.form-error.is-error:not(.is-progress) .form-error-icon,
+.form-error.is-progress .form-progress-icon {
+    display: block;
+}
+
+.form-error[hidden] {
+    display: none;
+}
+
+.form-error.is-error:not([hidden]) {
+    animation: error-shake 320ms ease-in-out;
+}
+
+.form-error.is-progress {
+    border-color: #16803c;
+    color: #16803c;
+}
+
+@keyframes error-shake {
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+
+    25% {
+        transform: translateX(-3px);
+    }
+
+    50% {
+        transform: translateX(3px);
+    }
+
+    75% {
+        transform: translateX(-1px);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .form-error.is-error:not([hidden]) {
+        animation: none;
+    }
+}
+
+form {
+    display: grid;
+    gap: 25px;
+}
+
+.form-field {
+    min-width: 0;
+    display: grid;
+    gap: 9px;
+}
+
+label,
+.time-fieldset legend {
+    font-size: 13px;
+    font-weight: 800;
+}
+
+input {
+    width: 100%;
+    min-height: 50px;
+    padding: 0 14px;
+    border: 1px solid #000000;
+    border-radius: 0;
+    color: #000000;
+    background: #ffffff;
+    font: inherit;
+    font-size: 14px;
+}
+
+input::placeholder {
+    color: #000000;
+    opacity: 0.5;
+}
+
+input:focus-visible,
+button:focus-visible {
+    outline: 3px solid #ff0000;
+    outline-offset: 3px;
+}
+
+.time-fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.time-fieldset legend {
+    margin-bottom: 13px;
+    padding: 0;
+}
+
+.time-fieldset legend span {
+    margin-left: 6px;
+    color: #ff0000;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+}
+
+.time-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.submit-button {
+    width: 100%;
+    min-height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    border: 1px solid #ff0000;
+    border-radius: 0;
+    color: #ffffff;
+    background: #ff0000;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 850;
+    cursor: pointer;
+}
+
+.submit-button:hover {
+    border-color: #000000;
+    color: #ffffff;
+    background: #000000;
+}
+
+.button-arrow {
+    font-size: 19px;
+    line-height: 1;
+}
+
+@media (max-width: 600px) {
+    .page-content {
+        padding: 48px 24px 60px;
+    }
+
+    .download-card {
+        padding: 36px 25px 29px;
+        box-shadow: 6px 6px 0 #000000;
+    }
+
+    .time-fields {
+        gap: 10px;
+    }
+}
+
+@media (max-width: 380px) {
+    .time-fields {
+        grid-template-columns: 1fr;
+    }
+}

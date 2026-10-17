@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <title>AuDown</title>
+    <link rel="stylesheet" href="/static/css/index.css">
+</head>
+<body>
+    <main class="page-content">
+        <section class="download-card" aria-labelledby="page-title">
+            <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span>Live Now</p>
+            <h1 class="brand" id="page-title">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 32 32" focusable="false">
+                        <path d="M16 5v21m-8-8 8 8 8-8"></path>
+                    </svg>
+                </span>
+                <span>AuDown</span>
+            </h1>
+
+            <p class="form-error" id="form-error" role="status" aria-live="polite" hidden>
+                <svg class="form-error-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 2.5 1.8 20.5c-.5.9.1 1.9 1.1 1.9h18.2c1 0 1.6-1 1.1-1.9L13 2.5c-.5-.9-1.5-.9-2 0Z" fill="#ff0000"></path>
+                    <path d="M12 8v6" stroke="#ffffff" stroke-width="2" stroke-linecap="round"></path>
+                    <circle cx="12" cy="17.5" r="1.1" fill="#ffffff"></circle>
+                </svg>
+                <svg class="form-progress-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+                    <path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+                <span class="form-error-message"></span>
+            </p>
+
+            <form id="download-form" action="/download" method="post">
+                <div class="form-field">
+                    <label for="url">유튜브 링크</label>
+                    <input
+                        id="url"
+                        name="url"
+                        type="url"
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        autocomplete="url"
+                        required
+                    >
+                </div>
+
+                <fieldset class="time-fieldset">
+                    <legend>구간 선택 <span>선택 사항</span></legend>
+                    <div class="time-fields">
+                        <div class="form-field">
+                            <label for="startTime">시작 시간</label>
+                            <input
+                                id="startTime"
+                                name="startTime"
+                                type="text"
+                                inputmode="numeric"
+                                autocomplete="off"
+                                placeholder="00:00:00"
+                                pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]"
+                                maxlength="8"
+                                aria-describedby="time-help"
+                            >
+                        </div>
+                        <div class="form-field">
+                            <label for="endTime">종료 시간</label>
+                            <input
+                                id="endTime"
+                                name="endTime"
+                                type="text"
+                                inputmode="numeric"
+                                autocomplete="off"
+                                placeholder="00:00:00"
+                                pattern="[0-9]{2}:[0-5][0-9]:[0-5][0-9]"
+                                maxlength="8"
+                                aria-describedby="time-help"
+                            >
+                        </div>
+                    </div>
+                </fieldset>
+
+                <button class="submit-button" type="submit">
+                    <span>노래 다운로드</span>
+                    <span class="button-arrow" aria-hidden="true">↗</span>
+                </button>
+            </form>
+        </section>
+    </main>
+    <script src="/static/js/index.js"></script>
+</body>
+</html>
