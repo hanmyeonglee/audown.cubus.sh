@@ -59,6 +59,10 @@ func main() {
 		slog.Error("Server start failed", "error", publicDirErr)
 		return
 	}
+	if mimeErr := mime.AddExtensionType(".webmanifest", "application/manifest+json"); mimeErr != nil {
+		slog.Error("Server start failed", "error", mimeErr)
+		return
+	}
 
 	http.Handle("/", http.FileServer(http.Dir(publicDirPath)))
 	http.HandleFunc("POST /download", func(w http.ResponseWriter, r *http.Request) {

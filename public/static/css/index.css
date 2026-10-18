@@ -101,6 +101,28 @@ body {
     font-weight: bold;
 }
 
+.offline-message {
+    display: none;
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    text-align: center;
+}
+
+.is-offline .offline-message {
+    display: block;
+    animation: fade-in-up 630ms ease both;
+}
+
+.is-offline .form-error,
+.is-offline #download-form {
+    display: none;
+}
+
+.is-offline .eyebrow {
+    display: none;
+}
+
 .form-error-icon {
     display: none;
     width: 18px;
@@ -152,6 +174,10 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
     .form-error.is-error:not([hidden]) {
+        animation: none;
+    }
+
+    .is-offline .offline-message {
         animation: none;
     }
 

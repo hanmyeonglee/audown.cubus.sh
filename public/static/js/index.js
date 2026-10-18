@@ -8,6 +8,12 @@ import {
     syncTimeRangeFormValues,
 } from "./time-range.js";
 
+if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch((error) => {
+        console.error("Service worker registration failed", error);
+    });
+}
+
 const form = document.getElementById("download-form");
 const urlInput = document.getElementById("url");
 const urlSubmission = document.getElementById("url-submission");
@@ -107,6 +113,26 @@ function setUrlLoading(loading) {
 
 function setUrlError(hasError) {
     urlInputWrap.classList.toggle("is-error", hasError);
+}
+
+function setOfflineState(isOffline) {
+    document.documentElement.classList.toggle("is-offline", isOffline);
+    form.hidden = isOffline;
+
+    if (!isOffline) {
+        return;
+    }
+
+    hideNotice();
+    setUrlError(false);
+
+    if (activeRequest) {
+        requestSequence += 1;
+        activeRequest.abort();
+        activeRequest = null;
+    }
+
+    setUrlLoading(false);
 }
 
 function showUrlError(message) {
@@ -327,3 +353,7 @@ window.addEventListener("pagehide", () => {
     window.clearInterval(downloadResponsePollTimer);
     window.clearTimeout(downloadCompleteResetTimer);
 });
+
+window.addEventListener("online", () => setOfflineState(false));
+window.addEventListener("offline", () => setOfflineState(true));
+setOfflineState(!navigator.onLine);

@@ -5,8 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#ffffff">
     <title>AuDown</title>
+    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/static/images/app-icon-192.png">
     <link rel="stylesheet" href="/static/css/index.css">
+    <script>if (!navigator.onLine) document.documentElement.classList.add("is-offline");</script>
 </head>
 <body>
     <main class="page-content">
@@ -20,6 +23,8 @@
                 </span>
                 <span>AuDown</span>
             </h1>
+
+            <p class="offline-message" role="status" aria-live="polite">네트워크에 연결해주세요</p>
 
             <p class="form-error" id="form-error" role="status" aria-live="polite" hidden>
                 <svg class="form-error-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
