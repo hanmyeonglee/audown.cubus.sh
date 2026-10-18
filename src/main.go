@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -11,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func logging(next http.Handler) http.Handler {
@@ -43,15 +47,30 @@ func isTimeExpressionRight(startTime string, endTime string) bool {
 
 const badRequestMsg = "잘못된 입력입니다. 다시 시도해주세요."
 const internalServerErrorMsg = "오류가 발생했습니다. 다시 시도해주세요."
+const downloadTimeoutMsg = "처리에 너무 긴 시간이 걸립니다. 다른 영상이나 짧은 구간을 시도해주세요."
 const downloadResponseCookieName = "audown-download-response"
+const ytDlpTimeout = 110 * time.Second
 
 var downloadTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+
+func killProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+
+	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
+}
 
 func main() {
 	slog.Info("Server start")
 
 	badRequestQuery := "/?err=" + url.QueryEscape(badRequestMsg)
 	internalServerErrorQuery := "/?err=" + url.QueryEscape(internalServerErrorMsg)
+	downloadTimeoutQuery := "/?err=" + url.QueryEscape(downloadTimeoutMsg)
 
 	publicDir := os.Getenv("PUBLIC_DIR_NAME")
 	publicDirPath, publicDirErr := filepath.Abs(publicDir)
@@ -122,11 +141,24 @@ func main() {
 
 		args = append(args, url)
 
-		cmd := exec.Command("yt-dlp", args...)
+		ctx, cancel := context.WithTimeout(r.Context(), ytDlpTimeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return killProcessGroup(cmd)
+		}
+
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		cmdErr := cmd.Run()
 		if cmdErr != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				slog.Warn("Server Timeout", "yt-dlp stderr", stderr.String())
+				http.Redirect(w, r, downloadTimeoutQuery, http.StatusSeeOther)
+				return
+			}
 			slog.Error("Server Error", "error", cmdErr, "yt-dlp stderr", stderr.String())
 			http.Redirect(w, r, internalServerErrorQuery, http.StatusSeeOther)
 			return
