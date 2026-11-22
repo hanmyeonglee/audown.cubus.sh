@@ -1,7 +1,7 @@
 services:
   audown:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    extends:
+      file: compose.service.yml
+      service: audown
     ports:
       - "127.0.0.1:3000:80"

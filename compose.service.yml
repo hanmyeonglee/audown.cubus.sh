@@ -1,0 +1,13 @@
+services:
+  audown:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
