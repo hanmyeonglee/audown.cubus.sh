@@ -9,7 +9,7 @@ FROM node:24-trixie-slim AS runtime
 
 ARG YT_DLP_VERSION=2026.08.19
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     release_url="https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}"; \
