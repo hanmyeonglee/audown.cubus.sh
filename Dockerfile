@@ -5,24 +5,21 @@ COPY go.mod ./
 COPY src ./src
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/main ./src
 
-FROM node:24-trixie-slim AS runtime
+FROM node:24.22.3-trixie-slim AS runtime
 
 ARG YT_DLP_VERSION=2026.08.19
+ARG YT_DLP_SHA256=58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     release_url="https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}"; \
     curl -fsSL "$release_url/yt-dlp_linux" -o /tmp/yt-dlp_linux; \
-    curl -fsSL "$release_url/SHA2-256SUMS" -o /tmp/SHA2-256SUMS; \
-    grep "  yt-dlp_linux$" /tmp/SHA2-256SUMS > /tmp/yt-dlp.sha256; \
-    test -s /tmp/yt-dlp.sha256; \
-    (cd /tmp && sha256sum --check /tmp/yt-dlp.sha256); \
-    chmod +x /tmp/yt-dlp_linux; \
-    mv /tmp/yt-dlp_linux /usr/local/bin/yt-dlp; \
-    rm /tmp/SHA2-256SUMS /tmp/yt-dlp.sha256
+    echo "${YT_DLP_SHA256}  /tmp/yt-dlp_linux" | sha256sum --check -; \
+    chmod 0755 /tmp/yt-dlp_linux; \
+    mv /tmp/yt-dlp_linux /usr/local/bin/yt-dlp
 
-RUN mkdir /app
+RUN mkdir -p /app
 COPY --from=builder /out/main /app/main
 
 COPY public /app/public
@@ -48,8 +45,11 @@ RUN --mount=type=bind,source=.env,target=/tmp/audown.env,ro \
       fs.writeFileSync("/app/public/static/js/config.js", `export const YOUTUBE_API_KEY = ${JSON.stringify(val)};\n`); \
     '
 
+RUN chmod 0755 /app /app/main && chmod -R a+rX /app/public
+
 ENV PUBLIC_DIR_NAME=/app/public
 
 WORKDIR /app
-EXPOSE 80 9090
+USER node
+EXPOSE 8080 9090
 CMD ["./main"]

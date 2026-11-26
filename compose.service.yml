@@ -9,18 +9,16 @@ services:
     read_only: true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:rw,nosuid,nodev,size=1g
+      - /tmp:rw,nosuid,nodev,mode=1777,size=1g
     stop_grace_period: 15s
     expose:
-      - "80"
+      - "8080"
       - "9090"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 5s
       timeout: 3s
       retries: 6

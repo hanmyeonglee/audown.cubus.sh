@@ -82,6 +82,9 @@ func TestLoadConfigAdminValidation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected disabled admin config to succeed for %q, got: %v", tok, err)
 		}
+		if cfg.ListenAddr != ":8080" || cfg.MainPort != 8080 {
+			t.Fatalf("expected default ListenAddr :8080 / MainPort 8080, got %q / %d", cfg.ListenAddr, cfg.MainPort)
+		}
 		if cfg.AdminAPIToken != "" {
 			t.Fatalf("expected empty AdminAPIToken, got %q", cfg.AdminAPIToken)
 		}
@@ -147,6 +150,7 @@ func TestLoadConfigAdminValidation(t *testing.T) {
 		{"admin port 0", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "ADMIN_PORT": "0"}},
 		{"admin port 65536", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "ADMIN_PORT": "65536"}},
 		{"admin port non-numeric", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "ADMIN_PORT": "abc"}},
+		{"admin port collides with default main 8080", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "ADMIN_PORT": "8080"}},
 		{"admin port collides with main", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "LISTEN_ADDR": ":80", "ADMIN_PORT": "80"}},
 		{"admin port collides default 9090", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "LISTEN_ADDR": ":9090"}},
 		{"bind CIDR invalid", map[string]string{"ADMIN_API_TOKEN": testAdminToken, "ADMIN_BIND_CIDR": "not-a-cidr"}},
@@ -546,7 +550,9 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 	adminH := adminSrv.Handler()
 
 	mode := "ok"
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, audioFormat, _, _, _ string) error {
+	var lastVideoURL string
+	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _ string, audioFormat, _, _, videoURL string) error {
+		lastVideoURL = videoURL
 		dir := filepath.Dir(outputPattern)
 		switch mode {
 		case "timeout":
@@ -564,11 +570,38 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 			return os.Mkdir(filepath.Join(dir, "subdir"), 0o700)
 		case "symlink_output":
 			return os.Symlink("/etc/passwd", filepath.Join(dir, "evil."+audioFormat))
+		case "wrong_ext":
+			return os.WriteFile(filepath.Join(dir, "sample.webm"), []byte("not-mp3"), 0o600)
+		case "oversized_output":
+			p := filepath.Join(dir, "huge."+audioFormat)
+			if err := os.WriteFile(p, nil, 0o600); err != nil {
+				return err
+			}
+			return os.Truncate(p, maxOutputFileBytes+1)
+		case "upper_ext":
+			return os.WriteFile(filepath.Join(dir, "SAMPLE."+strings.ToUpper(audioFormat)), []byte("audio-bytes"), 0o600)
 		default:
 			return os.WriteFile(filepath.Join(dir, "sample."+audioFormat), []byte("audio-bytes"), 0o600)
 		}
 	})
 	pubH := app.handler()
+
+	// Healthcheck endpoint: GET & HEAD -> 200 with security headers, POST -> 405.
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		hReq := httptest.NewRequest(method, "/healthz", nil)
+		hRec := httptest.NewRecorder()
+		pubH.ServeHTTP(hRec, hReq)
+		if hRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s /healthz, got %d", method, hRec.Code)
+		}
+		assertAdminSecurityHeaders(t, hRec.Header())
+	}
+	postHealth := httptest.NewRequest(http.MethodPost, "/healthz", nil)
+	postHealthRec := httptest.NewRecorder()
+	pubH.ServeHTTP(postHealthRec, postHealth)
+	if postHealthRec.Code != http.StatusMethodNotAllowed || postHealthRec.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("expected 405 Allow: GET, HEAD for POST /healthz, got %d Allow=%q", postHealthRec.Code, postHealthRec.Header().Get("Allow"))
+	}
 
 	// Dotfile access under publicDir must return 404.
 	dotReq := httptest.NewRequest(http.MethodGet, "/.env", nil)
@@ -603,6 +636,12 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 		{"playlist url rejected", url.Values{"url": {"https://www.youtube.com/playlist?list=PL123"}}},
 		{"url with space", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ extra"}}},
 		{"url with port", url.Values{"url": {"https://www.youtube.com:443/watch?v=dQw4w9WgXcQ"}}},
+		{"url with empty port", url.Values{"url": {"https://www.youtube.com:/watch?v=dQw4w9WgXcQ"}}},
+		{"duplicate v param", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ&v=aaaaaaaaaaa"}}},
+		{"live url rejected", url.Values{"url": {"https://www.youtube.com/live/dQw4w9WgXcQ"}}},
+		{"repeated slashes rejected", url.Values{"url": {"https://www.youtube.com//shorts/dQw4w9WgXcQ"}}},
+		{"fragment rejected", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=10"}}},
+		{"non-ascii rejected", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=한글"}}},
 		{"bad startTime format", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, "startTime": {"bad"}}},
 		{"bad endTime format", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, "endTime": {"00:99:00"}}},
 		{"startTime >= endTime", url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, "startTime": {"00:01:00"}, "endTime": {"00:00:30"}}},
@@ -639,9 +678,11 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 		{"two_files", app.internalURL},
 		{"dir_output", app.internalURL},
 		{"symlink_output", app.internalURL},
+		{"wrong_ext", app.internalURL},
+		{"oversized_output", app.internalURL},
 	} {
 		mode = tc.mode
-		form := url.Values{"url": {"https://www.youtube.com/shorts/dQw4w9WgXcQ"}}
+		form := url.Values{"url": {"https://www.youtube.com/shorts/dQw4w9WgXcQ?feature=share"}}
 		req := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		rec := httptest.NewRecorder()
@@ -649,9 +690,25 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != tc.expected {
 			t.Fatalf("mode %s: expected 303 %q, got %d %q", tc.mode, tc.expected, rec.Code, rec.Header().Get("Location"))
 		}
+		if lastVideoURL != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+			t.Fatalf("mode %s: expected canonical video URL forwarded to runner, got %q", tc.mode, lastVideoURL)
+		}
 		if st.ActiveDownloads() != 0 {
 			t.Fatalf("mode %s leaked download slot: active=%d", tc.mode, st.ActiveDownloads())
 		}
+	}
+
+	// Uppercase matching extension is accepted (case-insensitive extension check).
+	mode = "upper_ext"
+	upperReq := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(url.Values{"url": {"https://youtu.be/dQw4w9WgXcQ?si=tracker"}}.Encode()))
+	upperReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	upperRec := httptest.NewRecorder()
+	pubH.ServeHTTP(upperRec, upperReq)
+	if upperRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for uppercase matching extension, got %d", upperRec.Code)
+	}
+	if lastVideoURL != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+		t.Fatalf("expected canonical URL from youtu.be input, got %q", lastVideoURL)
 	}
 
 	// Timeout mode -> timeoutURL redirect (simulated cleanly via pre-expired context or short Wait).
@@ -723,7 +780,8 @@ func TestSanitizedCommandEnvAndSubprocessHelpers(t *testing.T) {
 	t.Setenv("YOUTUBE_API_KEY", "AIzaSyShouldNeverReachSubprocess")
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
 
-	env := sanitizedCommandEnv(os.Getenv)
+	jobTmp := "/tmp/audown-job-test/tmp"
+	env := sanitizedCommandEnv(os.Getenv, jobTmp)
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "ADMIN_API_TOKEN=") || strings.HasPrefix(entry, "YOUTUBE_API_KEY=") {
 			t.Fatalf("secret env var leaked into sanitizedCommandEnv: %s", entry)
@@ -732,13 +790,37 @@ func TestSanitizedCommandEnvAndSubprocessHelpers(t *testing.T) {
 	if !slices.Contains(env, "PATH=/usr/local/bin:/usr/bin") {
 		t.Fatalf("expected PATH in sanitizedCommandEnv, got %v", env)
 	}
-	if !slices.Contains(env, "HOME=/tmp") || !slices.Contains(env, "XDG_CACHE_HOME=/tmp") {
-		t.Fatalf("expected HOME/XDG_CACHE_HOME=/tmp in sanitizedCommandEnv, got %v", env)
+	if !slices.Contains(env, "HOME="+jobTmp) ||
+		!slices.Contains(env, "XDG_CACHE_HOME="+jobTmp) ||
+		!slices.Contains(env, "TMPDIR="+jobTmp) {
+		t.Fatalf("expected per-job HOME/XDG_CACHE_HOME/TMPDIR=%q in sanitizedCommandEnv, got %v", jobTmp, env)
 	}
 
 	args := buildYtDlpArgs("/tmp/dl/%(title)s.%(ext)s", "m4a", "00:00:10", "00:00:20", "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-	if !slices.Contains(args, "--no-cache-dir") || !slices.Contains(args, "--audio-format=m4a") {
-		t.Fatalf("unexpected yt-dlp args: %v", args)
+	for _, required := range []string{
+		"--ignore-config",
+		"--no-exec",
+		"--abort-on-error",
+		"--no-continue",
+		"--no-playlist",
+		"--no-cache-dir",
+		"--audio-format=m4a",
+		"--max-downloads",
+		"1",
+		"--break-per-input",
+		"--max-filesize",
+		"150M",
+		"--match-filter",
+		"!is_live & duration<=7200",
+		"--js-runtimes",
+		"node",
+	} {
+		if !slices.Contains(args, required) {
+			t.Fatalf("missing required yt-dlp arg %q in %v", required, args)
+		}
+	}
+	if slices.Contains(args, "--ignore-errors") {
+		t.Fatalf("did not expect --ignore-errors in yt-dlp args: %v", args)
 	}
 	if slices.Contains(args, "-v") {
 		t.Fatalf("did not expect verbose -v flag in yt-dlp args: %v", args)
@@ -767,6 +849,144 @@ func TestSanitizedCommandEnvAndSubprocessHelpers(t *testing.T) {
 	_ = cmd.Wait()
 }
 
+func TestCanonicalizeYouTubeURLAndLogSanitization(t *testing.T) {
+	const canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+	validCases := []string{
+		"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+		"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&si=abc123",
+		"https://www.youtube.com/watch?feature=shared&v=dQw4w9WgXcQ",
+		"https://www.youtube.com/shorts/dQw4w9WgXcQ",
+		"https://www.youtube.com/shorts/dQw4w9WgXcQ?feature=share",
+		"https://www.youtube.com/embed/dQw4w9WgXcQ",
+		"https://www.youtube.com/v/dQw4w9WgXcQ",
+		"https://youtu.be/dQw4w9WgXcQ",
+		"https://youtu.be/dQw4w9WgXcQ?si=tracking&t=12",
+	}
+	for _, raw := range validCases {
+		got, ok := canonicalizeYouTubeURL(raw)
+		if !ok || got != canonical {
+			t.Fatalf("canonicalizeYouTubeURL(%q) = (%q, %t), want (%q, true)", raw, got, ok, canonical)
+		}
+	}
+
+	invalidCases := []struct {
+		name string
+		raw  string
+	}{
+		{"empty", ""},
+		{"http scheme", "http://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+		{"uppercase scheme", "HTTPS://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+		{"uppercase host", "https://WWW.YOUTUBE.COM/watch?v=dQw4w9WgXcQ"},
+		{"empty port", "https://www.youtube.com:/watch?v=dQw4w9WgXcQ"},
+		{"explicit port", "https://www.youtube.com:443/watch?v=dQw4w9WgXcQ"},
+		{"userinfo", "https://user@www.youtube.com/watch?v=dQw4w9WgXcQ"},
+		{"duplicate v param", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v=aaaaaaaaaaa"},
+		{"duplicate v empty", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v="},
+		{"semicolon query", "https://www.youtube.com/watch?v=dQw4w9WgXcQ;v=aaaaaaaaaaa"},
+		{"malformed percent query", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=%zz"},
+		{"missing v param", "https://www.youtube.com/watch?list=PL123"},
+		{"short video id", "https://www.youtube.com/watch?v=shortID"},
+		{"long video id", "https://www.youtube.com/watch?v=dQw4w9WgXcQ1"},
+		{"live path blocked", "https://www.youtube.com/live/dQw4w9WgXcQ"},
+		{"leading double slash", "https://www.youtube.com//shorts/dQw4w9WgXcQ"},
+		{"inner double slash", "https://www.youtube.com/shorts//dQw4w9WgXcQ"},
+		{"trailing slash shorts", "https://www.youtube.com/shorts/dQw4w9WgXcQ/"},
+		{"trailing slash youtu.be", "https://youtu.be/dQw4w9WgXcQ/"},
+		{"double slash youtu.be", "https://youtu.be//dQw4w9WgXcQ"},
+		{"percent encoded path", "https://www.youtube.com/%73horts/dQw4w9WgXcQ"},
+		{"fragment with value", "https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=10"},
+		{"bare fragment", "https://www.youtube.com/watch?v=dQw4w9WgXcQ#"},
+		{"backslash", `https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=\evil`},
+		{"non-ascii bytes", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=한글"},
+		{"control char newline", "https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"},
+		{"leading space", " https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+		{"oversized url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&pad=" + strings.Repeat("a", maxURLBytes)},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := canonicalizeYouTubeURL(tc.raw); ok {
+				t.Fatalf("expected rejection for %s (%q), got %q", tc.name, tc.raw, got)
+			}
+		})
+	}
+
+	// sanitizeForLog bounds length and escapes control / non-ASCII bytes.
+	rawLog := "bad\r\n\t" + strings.Repeat("A", 300)
+	san := sanitizeForLog(rawLog, maxLoggedInputBytes)
+	if strings.ContainsAny(san, "\r\n\t") {
+		t.Fatalf("sanitizeForLog left raw control chars: %q", san)
+	}
+	if !strings.HasSuffix(san, "...") || len(san) > maxLoggedInputBytes*4+3 {
+		t.Fatalf("sanitizeForLog did not bound output: len=%d val=%q", len(san), san)
+	}
+}
+
+func TestPerJobTmpDirIsolationAndCleanup(t *testing.T) {
+	pubDir := t.TempDir()
+	st := NewSettingsStore()
+
+	var capturedJobDirs []string
+	failNext := false
+	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, jobTmpDir, audioFormat, _, _, _ string) error {
+		outDir := filepath.Dir(outputPattern)
+		jobDir := filepath.Dir(outDir)
+		if !strings.HasPrefix(filepath.Base(jobDir), "audown-job-") {
+			return fmt.Errorf("expected audown-job-* dir, got %q", jobDir)
+		}
+		if filepath.Base(outDir) != "out" {
+			return fmt.Errorf("expected out/ subdir, got %q", outDir)
+		}
+		if jobTmpDir != filepath.Join(jobDir, "tmp") {
+			return fmt.Errorf("expected jobTmpDir %q, got %q", filepath.Join(jobDir, "tmp"), jobTmpDir)
+		}
+		// Simulate PyInstaller onefile _MEI* extraction inside jobTmpDir.
+		meiDir := filepath.Join(jobTmpDir, "_MEI123456")
+		if err := os.MkdirAll(meiDir, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(meiDir, "libpython.so"), []byte("pyinstaller-payload"), 0o600); err != nil {
+			return err
+		}
+		capturedJobDirs = append(capturedJobDirs, jobDir)
+		if failNext {
+			return errors.New("simulated SIGKILL abort")
+		}
+		return os.WriteFile(filepath.Join(outDir, "track."+audioFormat), []byte("audio"), 0o600)
+	})
+	pubH := app.handler()
+
+	// 1. Successful download reclaims jobDir + _MEI* directory.
+	req := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	pubH.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on success, got %d", rec.Code)
+	}
+
+	// 2. Aborted/failed download also reclaims jobDir + _MEI* directory.
+	failNext = true
+	req2 := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(url.Values{"url": {"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	pubH.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusSeeOther || rec2.Header().Get("Location") != app.internalURL {
+		t.Fatalf("expected 303 internalURL on failure, got %d %q", rec2.Code, rec2.Header().Get("Location"))
+	}
+
+	if len(capturedJobDirs) != 2 {
+		t.Fatalf("expected 2 job dirs captured, got %d", len(capturedJobDirs))
+	}
+	if capturedJobDirs[0] == capturedJobDirs[1] {
+		t.Fatalf("expected distinct per-job directories, got identical %q", capturedJobDirs[0])
+	}
+	for _, dir := range capturedJobDirs {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected jobDir %q (and its _MEI* contents) to be removed, stat err=%v", dir, err)
+		}
+	}
+}
+
 func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 	pubDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(pubDir, "index.html"), []byte("<html>ok</html>"), 0o600); err != nil {
@@ -784,7 +1004,7 @@ func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 	var lastTimeout time.Duration
 	var lastAudioFormat string
 
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			return fmt.Errorf("missing context deadline")
@@ -860,11 +1080,18 @@ func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 	}
 	assertAdminSecurityHeaders(t, dlPaused.Header())
 
-	healthReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	healthRec := httptest.NewRecorder()
 	pubH.ServeHTTP(healthRec, healthReq)
 	if healthRec.Code != http.StatusOK {
-		t.Fatalf("expected GET / healthcheck 200 during maintenance, got %d", healthRec.Code)
+		t.Fatalf("expected GET /healthz 200 during maintenance, got %d", healthRec.Code)
+	}
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootRec := httptest.NewRecorder()
+	pubH.ServeHTTP(rootRec, rootReq)
+	if rootRec.Code != http.StatusOK {
+		t.Fatalf("expected GET / 200 during maintenance, got %d", rootRec.Code)
 	}
 
 	// Re-enable downloads -> POST /download works again.
@@ -898,7 +1125,7 @@ func TestMaxConcurrentDownloadsDynamicResizeNoDeadlock(t *testing.T) {
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
 
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		started <- struct{}{}
 		select {
 		case <-release:
@@ -989,7 +1216,7 @@ func TestAdminAPIConcurrentRaceAndRealTCP(t *testing.T) {
 	}()
 
 	// Real TCP public listener with ReadTimeout=30s and deadlineResponseWriter.
-	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		return os.WriteFile(filepath.Join(filepath.Dir(outputPattern), "race."+audioFormat), []byte("ok"), 0o600)
 	})
 	pubLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1069,7 +1296,7 @@ func TestAdminAPIConcurrentRaceAndRealTCP(t *testing.T) {
 func TestPublicServerLongRunnerSurvivesReadTimeout(t *testing.T) {
 	pubDir := t.TempDir()
 	st := NewSettingsStore()
-	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		// Longer than ReadTimeout (40ms) to confirm ParseForm() clears ReadDeadline
 		// and does not cancel r.Context() while yt-dlp is executing.
 		time.Sleep(120 * time.Millisecond)

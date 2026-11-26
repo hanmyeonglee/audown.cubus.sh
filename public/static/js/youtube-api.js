@@ -29,7 +29,7 @@ export function extractVideoId(rawUrl) {
     id = parsedUrl.searchParams.get("v") || "";
   } else if (parsedUrl.hostname === "www.youtube.com") {
     const pathParts = parsedUrl.pathname.split("/").filter(Boolean);
-    if (["shorts", "embed", "live", "v"].includes(pathParts[0])) {
+    if (["shorts", "embed", "v"].includes(pathParts[0])) {
       id = pathParts[1] || "";
     }
   } else if (parsedUrl.hostname === "youtu.be") {

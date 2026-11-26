@@ -29,6 +29,9 @@ const (
 	downloadTimeoutMsg         = "처리에 너무 긴 시간이 걸립니다. 다른 영상이나 짧은 구간을 시도해주세요."
 	downloadResponseCookieName = "audown-download-response"
 	maxDownloadFormBytes       = 16 << 10
+	maxURLBytes                = 2048
+	maxLoggedInputBytes        = 128
+	maxOutputFileBytes         = 150 << 20
 	maxStderrBytes             = 64 << 10
 	cmdWaitDelay               = 5 * time.Second
 	downloadWriteIdleTimeout   = 30 * time.Second
@@ -38,7 +41,7 @@ const (
 var (
 	timeNotification     = regexp.MustCompile(`^\d{2,}:[0-5]\d:[0-5]\d$`)
 	downloadTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
-	videoIDParamPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	videoIDPattern       = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
 	audioMIMETypes = map[string]string{
 		".mp3":  "audio/mpeg",
@@ -59,7 +62,7 @@ var (
 	}
 )
 
-type downloadRunner func(ctx context.Context, outputPattern, audioFormat, startTime, endTime, videoURL string) error
+type downloadRunner func(ctx context.Context, outputPattern, jobTmpDir, audioFormat, startTime, endTime, videoURL string) error
 
 type appServer struct {
 	publicHandler http.Handler
@@ -115,6 +118,20 @@ func (a *appServer) handler() http.Handler {
 		}
 		a.publicHandler.ServeHTTP(w, r)
 	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("ok\n"))
+		}
+	})
 	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -131,7 +148,7 @@ func logging(next http.Handler) http.Handler {
 		slog.Info(
 			"HTTP Request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", sanitizeForLog(r.URL.Path, maxLoggedInputBytes),
 			"remote", r.RemoteAddr,
 		)
 
@@ -139,57 +156,102 @@ func logging(next http.Handler) http.Handler {
 	})
 }
 
-func isUrlFormatRight(rawURL string) bool {
-	if rawURL == "" || strings.TrimSpace(rawURL) != rawURL {
-		return false
+func sanitizeForLog(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	truncated := false
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+		truncated = true
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 3)
+	for i := range len(s) {
+		c := s[i]
+		if c >= 0x20 && c < 0x7f {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "\\x%02x", c)
+		}
+	}
+	if truncated {
+		b.WriteString("...")
+	}
+	return b.String()
+}
+
+func canonicalizeYouTubeURL(rawURL string) (string, bool) {
+	if rawURL == "" || len(rawURL) > maxURLBytes {
+		return "", false
 	}
 	for i := range len(rawURL) {
 		b := rawURL[i]
-		if b <= 0x20 || b == 0x7f {
-			return false
+		if b <= 0x20 || b >= 0x7f || b == '#' || b == '\\' {
+			return "", false
 		}
+	}
+	if !strings.HasPrefix(rawURL, "https://") {
+		return "", false
 	}
 
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" {
-		return false
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil || u.Fragment != "" || u.RawFragment != "" {
+		return "", false
+	}
+	if u.Host != "www.youtube.com" && u.Host != "youtu.be" {
+		return "", false
 	}
 
-	switch u.Hostname() {
+	rest := strings.TrimPrefix(rawURL, "https://"+u.Host)
+	rawPath, _, _ := strings.Cut(rest, "?")
+	if u.RawPath != "" || rawPath != u.Path || !strings.HasPrefix(u.Path, "/") || strings.Contains(u.Path, "//") {
+		return "", false
+	}
+
+	var q url.Values
+	if u.RawQuery != "" {
+		q, err = url.ParseQuery(u.RawQuery)
+		if err != nil {
+			return "", false
+		}
+	}
+
+	var videoID string
+	switch u.Host {
 	case "www.youtube.com":
 		if u.Path == "/watch" {
-			return videoIDParamPattern.MatchString(u.Query().Get("v"))
-		}
-		parts := splitNonEmptyPath(u.Path)
-		if len(parts) != 2 {
-			return false
-		}
-		switch parts[0] {
-		case "shorts", "embed", "live", "v":
-			return videoIDParamPattern.MatchString(parts[1])
-		default:
-			return false
+			vVals := q["v"]
+			if len(vVals) != 1 {
+				return "", false
+			}
+			videoID = vVals[0]
+		} else {
+			parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+			if len(parts) != 2 {
+				return "", false
+			}
+			switch parts[0] {
+			case "shorts", "embed", "v":
+				videoID = parts[1]
+			default:
+				return "", false
+			}
 		}
 	case "youtu.be":
-		parts := splitNonEmptyPath(u.Path)
-		return len(parts) == 1 && videoIDParamPattern.MatchString(parts[0])
-	default:
-		return false
-	}
-}
-
-func splitNonEmptyPath(urlPath string) []string {
-	trimmed := strings.Trim(urlPath, "/")
-	if trimmed == "" {
-		return nil
-	}
-	parts := strings.Split(trimmed, "/")
-	for _, p := range parts {
-		if p == "" {
-			return nil
+		parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+		if len(parts) != 1 {
+			return "", false
 		}
+		videoID = parts[0]
+	default:
+		return "", false
 	}
-	return parts
+
+	if !videoIDPattern.MatchString(videoID) {
+		return "", false
+	}
+	return "https://www.youtube.com/watch?v=" + videoID, true
 }
 
 func parseTimeSeconds(expr string) (int, bool) {
@@ -243,14 +305,17 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	return err
 }
 
-func sanitizedCommandEnv(getenv func(string) string) []string {
-	tmpDir := strings.TrimSpace(getenv("TMPDIR"))
+func sanitizedCommandEnv(getenv func(string) string, jobTmpDir string) []string {
+	tmpDir := strings.TrimSpace(jobTmpDir)
+	if tmpDir == "" {
+		tmpDir = strings.TrimSpace(getenv("TMPDIR"))
+	}
 	if tmpDir == "" {
 		tmpDir = "/tmp"
 	}
 	env := []string{
-		"HOME=/tmp",
-		"XDG_CACHE_HOME=/tmp",
+		"HOME=" + tmpDir,
+		"XDG_CACHE_HOME=" + tmpDir,
 		"TMPDIR=" + tmpDir,
 	}
 	for _, key := range allowedSubprocessEnvKeys {
@@ -263,14 +328,23 @@ func sanitizedCommandEnv(getenv func(string) string) []string {
 
 func buildYtDlpArgs(outputPattern, audioFormat, startTime, endTime, videoURL string) []string {
 	args := []string{
+		"--ignore-config",
+		"--no-exec",
 		"-o",
 		outputPattern,
 		"-x",
 		"--audio-format=" + audioFormat,
 		"--no-continue",
-		"--ignore-errors",
+		"--abort-on-error",
 		"--no-playlist",
 		"--no-cache-dir",
+		"--max-downloads",
+		"1",
+		"--break-per-input",
+		"--max-filesize",
+		"150M",
+		"--match-filter",
+		"!is_live & duration<=7200",
 		"--js-runtimes",
 		"node",
 	}
@@ -309,10 +383,13 @@ func (l *limitedBuffer) String() string {
 	return l.buf.String()
 }
 
-func runDownloadCommand(ctx context.Context, outputPattern, audioFormat, startTime, endTime, videoURL string) error {
+func runDownloadCommand(ctx context.Context, outputPattern, jobTmpDir, audioFormat, startTime, endTime, videoURL string) error {
 	args := buildYtDlpArgs(outputPattern, audioFormat, startTime, endTime, videoURL)
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-	cmd.Env = sanitizedCommandEnv(os.Getenv)
+	cmd.Env = sanitizedCommandEnv(os.Getenv, jobTmpDir)
+	if strings.TrimSpace(jobTmpDir) != "" {
+		cmd.Dir = jobTmpDir
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = cmdWaitDelay
 	cmd.Cancel = func() error {
@@ -397,8 +474,9 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, a.badReqURL, http.StatusSeeOther)
 		return
 	}
-	if !isUrlFormatRight(rawURL) {
-		slog.Error("Bad Request", "error", "invalid url format", "url", rawURL)
+	canonicalURL, ok := canonicalizeYouTubeURL(rawURL)
+	if !ok {
+		slog.Error("Bad Request", "error", "invalid url format", "url", sanitizeForLog(rawURL, maxLoggedInputBytes))
 		http.Redirect(w, r, a.badReqURL, http.StatusSeeOther)
 		return
 	}
@@ -407,7 +485,9 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	endTime := r.PostForm.Get("endTime")
 	downloadToken := r.PostForm.Get("downloadToken")
 	if !isTimeExpressionRight(startTime, endTime) {
-		slog.Error("Bad Request", "error", "time expression is invalid", "startTime", startTime, "endTime", endTime)
+		slog.Error("Bad Request", "error", "time expression is invalid",
+			"startTime", sanitizeForLog(startTime, maxLoggedInputBytes),
+			"endTime", sanitizeForLog(endTime, maxLoggedInputBytes))
 		http.Redirect(w, r, a.badReqURL, http.StatusSeeOther)
 		return
 	}
@@ -423,19 +503,32 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	tempDirPath, tempDirErr := os.MkdirTemp("", "download-")
-	if tempDirErr != nil {
-		slog.Error("Server Error", "error", tempDirErr)
+	jobDir, jobDirErr := os.MkdirTemp("", "audown-job-*")
+	if jobDirErr != nil {
+		slog.Error("Server Error", "error", jobDirErr)
 		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
 		return
 	}
-	defer os.RemoveAll(tempDirPath)
+	defer os.RemoveAll(jobDir)
 
-	musicDownloadPath := filepath.Join(tempDirPath, "%(title)s.%(ext)s")
+	outDir := filepath.Join(jobDir, "out")
+	tmpDir := filepath.Join(jobDir, "tmp")
+	if err := os.Mkdir(outDir, 0o700); err != nil {
+		slog.Error("Server Error", "error", err)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+	if err := os.Mkdir(tmpDir, 0o700); err != nil {
+		slog.Error("Server Error", "error", err)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+
+	musicDownloadPath := filepath.Join(outDir, "%(title)s.%(ext)s")
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(snap.YtDlpTimeoutSeconds)*time.Second)
 	defer cancel()
 
-	if cmdErr := a.runner(ctx, musicDownloadPath, snap.AudioFormat, startTime, endTime, rawURL); cmdErr != nil {
+	if cmdErr := a.runner(ctx, musicDownloadPath, tmpDir, snap.AudioFormat, startTime, endTime, canonicalURL); cmdErr != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			http.Redirect(w, r, a.timeoutURL, http.StatusSeeOther)
 			return
@@ -444,7 +537,7 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, musicCheckErr := os.ReadDir(tempDirPath)
+	files, musicCheckErr := os.ReadDir(outDir)
 	if musicCheckErr != nil {
 		slog.Error("Server Error", "error", musicCheckErr)
 		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
@@ -463,7 +556,41 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	musicName := files[0].Name()
-	musicPath := filepath.Join(tempDirPath, musicName)
+	expectedExt := "." + strings.ToLower(snap.AudioFormat)
+	if strings.ToLower(filepath.Ext(musicName)) != expectedExt {
+		slog.Error("Server Error", "error", "unexpected output file extension", "expected_ext", expectedExt, "actual_ext", filepath.Ext(musicName))
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+
+	outRoot, rootErr := os.OpenRoot(outDir)
+	if rootErr != nil {
+		slog.Error("Server Error", "error", rootErr)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+	defer outRoot.Close()
+
+	musicFile, openErr := outRoot.Open(musicName)
+	if openErr != nil {
+		slog.Error("Server Error", "error", openErr)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+	defer musicFile.Close()
+
+	fileInfo, statErr := musicFile.Stat()
+	if statErr != nil || !fileInfo.Mode().IsRegular() {
+		slog.Error("Server Error", "error", statErr)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+	if fileInfo.Size() > maxOutputFileBytes {
+		slog.Error("Server Error", "error", "output file exceeds size limit", "size_bytes", fileInfo.Size(), "max_bytes", maxOutputFileBytes)
+		http.Redirect(w, r, a.internalURL, http.StatusSeeOther)
+		return
+	}
+
 	cd := mime.FormatMediaType("attachment", map[string]string{"filename": musicName})
 	if cd == "" {
 		cd = "attachment"
@@ -489,7 +616,7 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetWriteDeadline(time.Time{})
 	}()
 	dw := &deadlineResponseWriter{w: w, rc: rc}
-	http.ServeFile(dw, r, musicPath)
+	http.ServeContent(dw, r, musicName, fileInfo.ModTime(), musicFile)
 }
 
 func run() error {

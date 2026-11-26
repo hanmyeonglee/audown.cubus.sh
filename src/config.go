@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	DefaultListenAddr = ":80"
+	DefaultListenAddr = ":8080"
 	DefaultPublicDir  = "public"
 	DefaultAdminPort  = 9090
 	MinAdminTokenLen  = 16
