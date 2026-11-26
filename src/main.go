@@ -36,6 +36,8 @@ const (
 	cmdWaitDelay               = 5 * time.Second
 	downloadWriteIdleTimeout   = 30 * time.Second
 	shutdownTimeout            = 12 * time.Second
+	startupInitTimeout         = 30 * time.Second
+	cleanupInterval            = 10 * time.Minute
 )
 
 var (
@@ -65,22 +67,47 @@ var (
 type downloadRunner func(ctx context.Context, outputPattern, jobTmpDir, audioFormat, startTime, endTime, videoURL string) error
 
 type appServer struct {
+	publicDir     string
 	publicHandler http.Handler
 	settings      *SettingsStore
+	auth          *AuthService
 	runner        downloadRunner
 	badReqURL     string
 	internalURL   string
 	timeoutURL    string
 }
 
-func newAppServer(publicDir string, settings *SettingsStore, runner downloadRunner) *appServer {
+type noDirListingFS struct {
+	fs http.FileSystem
+}
+
+func (n noDirListingFS) Open(name string) (http.File, error) {
+	f, err := n.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		_ = f.Close()
+		return nil, os.ErrNotExist
+	}
+	return f, nil
+}
+
+func newAppServer(publicDir string, settings *SettingsStore, auth *AuthService, runner downloadRunner) *appServer {
 	if runner == nil {
 		runner = runDownloadCommand
 	}
-	fileSrv := http.FileServer(http.Dir(publicDir))
+	fileSrv := http.FileServer(noDirListingFS{fs: http.Dir(publicDir)})
 	return &appServer{
+		publicDir:     publicDir,
 		publicHandler: rejectDotSegments(fileSrv),
 		settings:      settings,
+		auth:          auth,
 		runner:        runner,
 		badReqURL:     "/?err=" + url.QueryEscape(badRequestMsg),
 		internalURL:   "/?err=" + url.QueryEscape(internalServerErrorMsg),
@@ -108,16 +135,68 @@ func containsDotSegment(urlPath string) bool {
 	return false
 }
 
-func (a *appServer) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+func (a *appServer) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+
+	if a.settings.IsRequireAuth() {
+		if a.auth == nil {
+			http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		a.publicHandler.ServeHTTP(w, r)
-	})
+		if _, ok := a.auth.Authenticate(w, r); !ok {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+	}
+
+	root, err := os.OpenRoot(a.publicDir)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer root.Close()
+
+	f, err := root.Open("index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	http.ServeContent(w, r, "index.html", info.ModTime(), f)
+}
+
+func (a *appServer) servePublicStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path == "/sw.js" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	a.publicHandler.ServeHTTP(w, r)
+}
+
+func (a *appServer) handler() http.Handler {
+	mux := http.NewServeMux()
+
+	// Always-public operational & static routes.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -132,15 +211,76 @@ func (a *appServer) handler() http.Handler {
 			_, _ = w.Write([]byte("ok\n"))
 		}
 	})
+	mux.HandleFunc("/static/", a.servePublicStatic)
+	mux.HandleFunc("/manifest.webmanifest", a.servePublicStatic)
+	mux.HandleFunc("/favicon.ico", a.servePublicStatic)
+	mux.HandleFunc("/sw.js", a.servePublicStatic)
+
+	// Passkey auth routes.
+	if a.auth != nil {
+		mux.HandleFunc("/login", a.auth.handleLoginPage)
+		mux.HandleFunc("/invite/{token}", a.auth.handleInvitePage)
+		mux.HandleFunc("/auth/passkey/register/begin", a.auth.handleRegisterBegin)
+		mux.HandleFunc("/auth/passkey/register/finish", a.auth.handleRegisterFinish)
+		mux.HandleFunc("/auth/passkey/login/begin", a.auth.handleLoginBegin)
+		mux.HandleFunc("/auth/passkey/login/finish", a.auth.handleLoginFinish)
+		mux.HandleFunc("/auth/me", a.auth.handleAuthMe)
+		mux.HandleFunc("/auth/logout", a.auth.handleAuthLogout)
+	}
+
+	// Protected download route.
 	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if a.auth != nil && !a.auth.CheckCSRF(r) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			http.Error(w, "invalid request origin", http.StatusForbidden)
+			return
+		}
+		if a.settings.IsRequireAuth() {
+			if a.auth == nil {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if _, ok := a.auth.Authenticate(w, r); !ok {
+				if isBrowserNavigationRequest(r) {
+					w.Header().Set("Cache-Control", "no-store")
+					w.Header().Set("X-Content-Type-Options", "nosniff")
+					http.Redirect(w, r, "/login", http.StatusSeeOther)
+					return
+				}
+				writeAuthError(w, http.StatusUnauthorized, "authentication required")
+				return
+			}
+		}
 		a.handleDownload(w, r)
 	})
+
+	// Root web UI (strictly only "/" and "/index.html"; unknown paths 404).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/index.html":
+			a.serveIndexHTML(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
 	return logging(mux)
+}
+
+func sanitizePathForLog(urlPath string) string {
+	cleaned := path.Clean("/" + urlPath)
+	if (strings.HasPrefix(cleaned, "/invite/") && len(cleaned) > len("/invite/")) ||
+		strings.Contains(strings.ToLower(urlPath), "/invite/") {
+		return "/invite/[redacted]"
+	}
+	return sanitizeForLog(urlPath, maxLoggedInputBytes)
 }
 
 func logging(next http.Handler) http.Handler {
@@ -148,7 +288,7 @@ func logging(next http.Handler) http.Handler {
 		slog.Info(
 			"HTTP Request",
 			"method", r.Method,
-			"path", sanitizeForLog(r.URL.Path, maxLoggedInputBytes),
+			"path", sanitizePathForLog(r.URL.Path),
 			"remote", r.RemoteAddr,
 		)
 
@@ -605,6 +745,7 @@ func (a *appServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 			Value:    downloadToken,
 			Path:     "/",
 			MaxAge:   60,
+			Secure:   a.auth != nil && a.auth.cfg.CookieSecure,
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
@@ -633,11 +774,38 @@ func run() error {
 
 	slog.Info("Server start", "config", cfg)
 
-	settings := NewSettingsStore()
-	app := newAppServer(cfg.PublicDir, settings, nil)
-
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+
+	initCtx, cancelInit := context.WithTimeout(sigCtx, startupInitTimeout)
+	defer cancelInit()
+
+	dsn, err := ResolveDatabaseURL(initCtx, cfg, nil)
+	if err != nil {
+		return fmt.Errorf("resolve database URL: %w", err)
+	}
+	pool, err := OpenPool(initCtx, dsn)
+	if err != nil {
+		return fmt.Errorf("open database pool: %w", err)
+	}
+	defer pool.Close()
+
+	if err := Migrate(initCtx, pool); err != nil {
+		return fmt.Errorf("run database migrations: %w", err)
+	}
+
+	store := NewPostgresStore(pool)
+	settings := NewSettingsStoreWithStore(store)
+	if err := settings.Load(initCtx); err != nil {
+		return fmt.Errorf("load persisted settings: %w", err)
+	}
+
+	authSrv, err := NewAuthService(cfg, store, settings)
+	if err != nil {
+		return fmt.Errorf("initialize auth service: %w", err)
+	}
+
+	app := newAppServer(cfg.PublicDir, settings, authSrv, nil)
 
 	var adminSrv *AdminServer
 	var adminAddr string
@@ -646,7 +814,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("resolve admin bind address: %w", err)
 		}
-		adminSrv, err = NewAdminServer(settings, cfg.AdminAPIToken, cfg.AdminAllowCIDR)
+		adminSrv, err = NewAdminServer(settings, store, cfg.PublicBaseURL, cfg.AdminAPIToken, cfg.AdminAllowCIDR)
 		if err != nil {
 			return fmt.Errorf("initialize admin server: %w", err)
 		}
@@ -688,6 +856,25 @@ func run() error {
 		}
 	}
 
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case <-ticker.C:
+				cCtx, cancel := context.WithTimeout(sigCtx, 10*time.Second)
+				if err := store.CleanupExpired(cCtx, time.Now().UTC()); err != nil {
+					slog.Warn("Expired session/challenge cleanup failed", "error", err)
+				}
+				cancel()
+			}
+		}
+	}()
+
 	errCh := make(chan error, 2)
 	go func() {
 		slog.Info("Public HTTP server listening", "addr", publicLn.Addr().String())
@@ -713,6 +900,7 @@ func run() error {
 		slog.Info("Shutdown signal received")
 	case err := <-errCh:
 		runErr = err
+		stopSignals()
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -736,6 +924,7 @@ func run() error {
 		}()
 	}
 	wg.Wait()
+	<-cleanupDone
 
 	return runErr
 }

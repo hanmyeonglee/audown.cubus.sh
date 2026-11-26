@@ -357,3 +357,50 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("online", () => setOfflineState(false));
 window.addEventListener("offline", () => setOfflineState(true));
 setOfflineState(!navigator.onLine);
+
+const authBar = document.getElementById("auth-bar");
+const authUserName = document.getElementById("auth-user-name");
+const authLogoutButton = document.getElementById("auth-logout-button");
+
+async function initAuthBar() {
+    if (!authBar || !authUserName || !authLogoutButton) {
+        return;
+    }
+    try {
+        const resp = await fetch("/auth/me", {
+            credentials: "same-origin",
+            cache: "no-store",
+        });
+        if (resp.status === 401) {
+            window.location.replace("/login");
+            return;
+        }
+        if (!resp.ok) {
+            return;
+        }
+        const data = await resp.json();
+        if (data && data.authenticated && data.user && data.user.display_name) {
+            authUserName.textContent = data.user.display_name;
+            authBar.hidden = false;
+        }
+    } catch {
+        // Ignore transient offline errors; offline banner handles connectivity state.
+    }
+}
+
+if (authLogoutButton) {
+    authLogoutButton.addEventListener("click", async () => {
+        authLogoutButton.disabled = true;
+        try {
+            await fetch("/auth/logout", {
+                method: "POST",
+                credentials: "same-origin",
+            });
+        } catch {
+            // Redirect to login even if the network request fails.
+        }
+        window.location.assign("/login");
+    });
+}
+
+void initAuthBar();

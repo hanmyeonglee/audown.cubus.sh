@@ -234,32 +234,34 @@ func TestResolveBindAddr(t *testing.T) {
 
 func TestNewAdminServerValidation(t *testing.T) {
 	st := NewSettingsStore()
-	if _, err := NewAdminServer(nil, testAdminToken, nil); err == nil {
+	mem := newMemoryStore()
+	if _, err := NewAdminServer(nil, mem, DefaultPublicBaseURL, testAdminToken, nil); err == nil {
 		t.Fatal("expected NewAdminServer to reject nil settings")
 	}
-	if _, err := NewAdminServer(st, "", nil); err == nil {
+	if _, err := NewAdminServer(st, mem, DefaultPublicBaseURL, "", nil); err == nil {
 		t.Fatal("expected NewAdminServer to reject empty token")
 	}
-	if _, err := NewAdminServer(st, "short", nil); err == nil {
+	if _, err := NewAdminServer(st, mem, DefaultPublicBaseURL, "short", nil); err == nil {
 		t.Fatal("expected NewAdminServer to reject short token")
 	}
-	if _, err := NewAdminServer(st, "replace-with-random-token-value", nil); err == nil {
+	if _, err := NewAdminServer(st, mem, DefaultPublicBaseURL, "replace-with-random-token-value", nil); err == nil {
 		t.Fatal("expected NewAdminServer to reject placeholder token")
 	}
 	slashZero := netip.MustParsePrefix("0.0.0.0/0")
-	if _, err := NewAdminServer(st, testAdminToken, &slashZero); err == nil {
+	if _, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, &slashZero); err == nil {
 		t.Fatal("expected NewAdminServer to reject /0 allowCIDR")
 	}
 	v4in6 := netip.MustParsePrefix("::ffff:172.31.0.0/120")
-	if _, err := NewAdminServer(st, testAdminToken, &v4in6); err == nil {
+	if _, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, &v4in6); err == nil {
 		t.Fatal("expected NewAdminServer to reject IPv4-mapped IPv6 allowCIDR")
 	}
 }
 
 func TestAdminAPICIDRAuthAndMethodErrors(t *testing.T) {
 	st := NewSettingsStore()
+	mem := newMemoryStore()
 	allow := netip.MustParsePrefix("172.31.0.2/32")
-	srv, err := NewAdminServer(st, testAdminToken, &allow)
+	srv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, &allow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +342,7 @@ func TestAdminAPICIDRAuthAndMethodErrors(t *testing.T) {
 	}
 
 	// Loopback-only mode when allowCIDR == nil.
-	loSrv, err := NewAdminServer(st, testAdminToken, nil)
+	loSrv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,8 +373,9 @@ func TestAdminAPICIDRAuthAndMethodErrors(t *testing.T) {
 func TestAdminAPIManifestAndSettingsContract(t *testing.T) {
 	t.Setenv("YOUTUBE_API_KEY", "AIzaSySecretYoutubeKeyMustNeverLeak")
 
-	st := NewSettingsStore()
-	srv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	srv, err := NewAdminServer(st, mem, "https://audown.cubus.sh", testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,11 +391,13 @@ func TestAdminAPIManifestAndSettingsContract(t *testing.T) {
 	}
 
 	var manifest struct {
-		Service        string            `json:"service"`
-		Version        string            `json:"version"`
-		Capabilities   []string          `json:"capabilities"`
-		Endpoints      map[string]string `json:"endpoints"`
-		SettingsSchema []struct {
+		Service          string            `json:"service"`
+		Version          string            `json:"version"`
+		Capabilities     []string          `json:"capabilities"`
+		UserCapabilities map[string]bool   `json:"user_capabilities"`
+		UserColumns      []map[string]any  `json:"user_columns"`
+		Endpoints        map[string]string `json:"endpoints"`
+		SettingsSchema   []struct {
 			Key   string `json:"key"`
 			Label string `json:"label"`
 			Type  string `json:"type"`
@@ -407,15 +412,35 @@ func TestAdminAPIManifestAndSettingsContract(t *testing.T) {
 	if manifest.Service != "audown" || manifest.Version == "" {
 		t.Fatalf("unexpected manifest service/version: %+v", manifest)
 	}
-	if len(manifest.Capabilities) != 1 || manifest.Capabilities[0] != "settings" {
+	if !slices.Equal(manifest.Capabilities, []string{"settings", "users", "invites"}) {
 		t.Fatalf("unexpected capabilities: %v", manifest.Capabilities)
 	}
+	expectedUserCaps := map[string]bool{
+		"create":         false,
+		"approve":        false,
+		"toggle_status":  true,
+		"reset_password": false,
+		"change_role":    false,
+		"delete":         true,
+		"sessions":       true,
+		"invites":        true,
+	}
+	for k, want := range expectedUserCaps {
+		if got, ok := manifest.UserCapabilities[k]; !ok || got != want {
+			t.Fatalf("user_capabilities[%q] = (%v, %t), want (%v, true)", k, got, ok, want)
+		}
+	}
+	if len(manifest.UserColumns) != 2 || manifest.UserColumns[0]["key"] != "active_sessions" || manifest.UserColumns[1]["key"] != "last_login_at" {
+		t.Fatalf("unexpected user_columns: %+v", manifest.UserColumns)
+	}
 	if manifest.Endpoints["settings_get"] != "GET /admin/v1/settings" ||
-		manifest.Endpoints["settings_update"] != "PATCH /admin/v1/settings" {
+		manifest.Endpoints["settings_update"] != "PATCH /admin/v1/settings" ||
+		manifest.Endpoints["users_list"] != "GET /admin/v1/users" ||
+		manifest.Endpoints["invites_create"] != "POST /admin/v1/invites" {
 		t.Fatalf("unexpected endpoints: %v", manifest.Endpoints)
 	}
-	if len(manifest.SettingsSchema) != 4 {
-		t.Fatalf("expected 4 schema entries, got %d", len(manifest.SettingsSchema))
+	if len(manifest.SettingsSchema) != 5 {
+		t.Fatalf("expected 5 schema entries, got %d", len(manifest.SettingsSchema))
 	}
 
 	getRec := doAdminReq(t, h, http.MethodGet, "/admin/v1/settings", "127.0.0.1:40001", testAdminToken, nil)
@@ -443,8 +468,9 @@ func TestAdminAPIManifestAndSettingsContract(t *testing.T) {
 }
 
 func TestAdminAPIPatchValidationAndPartialUpdates(t *testing.T) {
-	st := NewSettingsStore()
-	srv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	srv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,8 +568,13 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := NewSettingsStore()
-	adminSrv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	requireAuthFalse := false
+	if _, err := st.Update(SettingsPatch{RequireAuth: &requireAuthFalse}); err != nil {
+		t.Fatal(err)
+	}
+	adminSrv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +582,7 @@ func TestDownloadValidationErrorPathsAndFormats(t *testing.T) {
 
 	mode := "ok"
 	var lastVideoURL string
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _ string, audioFormat, _, _, videoURL string) error {
+	app := newAppServer(pubDir, st, nil, func(ctx context.Context, outputPattern, _ string, audioFormat, _, _, videoURL string) error {
 		lastVideoURL = videoURL
 		dir := filepath.Dir(outputPattern)
 		switch mode {
@@ -924,10 +955,12 @@ func TestCanonicalizeYouTubeURLAndLogSanitization(t *testing.T) {
 func TestPerJobTmpDirIsolationAndCleanup(t *testing.T) {
 	pubDir := t.TempDir()
 	st := NewSettingsStore()
+	requireAuthFalse := false
+	_, _ = st.Update(SettingsPatch{RequireAuth: &requireAuthFalse})
 
 	var capturedJobDirs []string
 	failNext := false
-	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, jobTmpDir, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, nil, func(_ context.Context, outputPattern, jobTmpDir, audioFormat, _, _, _ string) error {
 		outDir := filepath.Dir(outputPattern)
 		jobDir := filepath.Dir(outDir)
 		if !strings.HasPrefix(filepath.Base(jobDir), "audown-job-") {
@@ -993,8 +1026,11 @@ func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := NewSettingsStore()
-	adminSrv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	requireAuthFalse := false
+	_, _ = st.Update(SettingsPatch{RequireAuth: &requireAuthFalse})
+	adminSrv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1040,7 @@ func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 	var lastTimeout time.Duration
 	var lastAudioFormat string
 
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, nil, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			return fmt.Errorf("missing context deadline")
@@ -1108,8 +1144,11 @@ func TestLiveBehaviorAffectedByAdminSettings(t *testing.T) {
 
 func TestMaxConcurrentDownloadsDynamicResizeNoDeadlock(t *testing.T) {
 	pubDir := t.TempDir()
-	st := NewSettingsStore()
-	adminSrv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	requireAuthFalse := false
+	_, _ = st.Update(SettingsPatch{RequireAuth: &requireAuthFalse})
+	adminSrv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1125,7 +1164,7 @@ func TestMaxConcurrentDownloadsDynamicResizeNoDeadlock(t *testing.T) {
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
 
-	app := newAppServer(pubDir, st, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, nil, func(ctx context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		started <- struct{}{}
 		select {
 		case <-release:
@@ -1199,8 +1238,11 @@ func TestMaxConcurrentDownloadsDynamicResizeNoDeadlock(t *testing.T) {
 
 func TestAdminAPIConcurrentRaceAndRealTCP(t *testing.T) {
 	pubDir := t.TempDir()
-	st := NewSettingsStore()
-	adminSrv, err := NewAdminServer(st, testAdminToken, nil)
+	mem := newMemoryStore()
+	st := NewSettingsStoreWithStore(mem)
+	requireAuthFalse := false
+	_, _ = st.Update(SettingsPatch{RequireAuth: &requireAuthFalse})
+	adminSrv, err := NewAdminServer(st, mem, DefaultPublicBaseURL, testAdminToken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1216,7 +1258,7 @@ func TestAdminAPIConcurrentRaceAndRealTCP(t *testing.T) {
 	}()
 
 	// Real TCP public listener with ReadTimeout=30s and deadlineResponseWriter.
-	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
+	app := newAppServer(pubDir, st, nil, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		return os.WriteFile(filepath.Join(filepath.Dir(outputPattern), "race."+audioFormat), []byte("ok"), 0o600)
 	})
 	pubLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1296,7 +1338,9 @@ func TestAdminAPIConcurrentRaceAndRealTCP(t *testing.T) {
 func TestPublicServerLongRunnerSurvivesReadTimeout(t *testing.T) {
 	pubDir := t.TempDir()
 	st := NewSettingsStore()
-	app := newAppServer(pubDir, st, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
+	requireAuthFalse := false
+	_, _ = st.Update(SettingsPatch{RequireAuth: &requireAuthFalse})
+	app := newAppServer(pubDir, st, nil, func(_ context.Context, outputPattern, _, audioFormat, _, _, _ string) error {
 		// Longer than ReadTimeout (40ms) to confirm ParseForm() clears ReadDeadline
 		// and does not cancel r.Context() while yt-dlp is executing.
 		time.Sleep(120 * time.Millisecond)

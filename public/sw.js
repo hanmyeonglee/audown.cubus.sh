@@ -1,10 +1,10 @@
-const CACHE_NAME = "audown-shell-v2";
+const CACHE_NAME = "audown-shell-v3";
 const APP_SHELL = [
-    "/",
     "/manifest.webmanifest",
     "/favicon.ico",
     "/static/css/index.css",
     "/static/js/index.js",
+    "/static/js/auth.js",
     "/static/js/notice.js",
     "/static/js/youtube-api.js",
     "/static/js/video-preview.js",
@@ -13,6 +13,14 @@ const APP_SHELL = [
     "/static/images/app-icon-192.png",
     "/static/images/app-icon-512.png",
 ];
+
+function isCacheablePath(pathname) {
+    return (
+        pathname === "/manifest.webmanifest" ||
+        pathname === "/favicon.ico" ||
+        pathname.startsWith("/static/")
+    );
+}
 
 self.addEventListener("install", (event) => {
     event.waitUntil((async () => {
@@ -36,21 +44,25 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
     const request = event.request;
-    if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) {
+    if (request.method !== "GET") {
+        return;
+    }
+
+    const url = new URL(request.url);
+    if (url.origin !== self.location.origin || !isCacheablePath(url.pathname)) {
         return;
     }
 
     event.respondWith(
         fetch(request).then(async (response) => {
-            const cache = await caches.open(CACHE_NAME);
-            if (response.ok) {
+            if (response.ok && response.type === "basic") {
+                const cache = await caches.open(CACHE_NAME);
                 await cache.put(request, response.clone());
             }
             return response;
         }).catch(async () => {
             const cache = await caches.open(CACHE_NAME);
-            const cacheKey = request.mode === "navigate" ? "/" : request;
-            return cache.match(cacheKey);
+            return cache.match(request);
         }),
     );
 });

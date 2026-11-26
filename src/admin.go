@@ -12,23 +12,35 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 const (
-	adminServiceName  = "audown"
-	adminAPIVersion   = "0.1.0"
-	maxAdminBodyBytes = 16 << 10
+	adminServiceName   = "audown"
+	adminAPIVersion    = "0.2.0"
+	maxAdminBodyBytes  = 16 << 10
+	defaultInviteTTL   = 168 // 7 days
+	minInviteTTLHours  = 1
+	maxInviteTTLHours  = 720 // 30 days
+	maxDisplayNameRune = 64
+	maxCreatedByRune   = 64
 )
 
 // AdminServer serves the internal-only :9090 Admin API consumed by admin.cubus.sh.
 type AdminServer struct {
-	settings  *SettingsStore
-	tokenHash [32]byte
-	allowCIDR *netip.Prefix
+	settings      *SettingsStore
+	store         Store
+	publicBaseURL string
+	tokenHash     [32]byte
+	allowCIDR     *netip.Prefix
+	nowFn         func() time.Time
 }
 
 // NewAdminServer constructs a validated AdminServer instance.
-func NewAdminServer(settings *SettingsStore, token string, allowCIDR *netip.Prefix) (*AdminServer, error) {
+func NewAdminServer(settings *SettingsStore, store Store, publicBaseURL, token string, allowCIDR *netip.Prefix) (*AdminServer, error) {
 	if settings == nil {
 		return nil, errors.New("settings store must not be nil")
 	}
@@ -45,11 +57,25 @@ func NewAdminServer(settings *SettingsStore, token string, allowCIDR *netip.Pref
 		masked := allowCIDR.Masked()
 		allowCIDR = &masked
 	}
+	baseURL := strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
+	if baseURL == "" {
+		baseURL = DefaultPublicBaseURL
+	}
 	return &AdminServer{
-		settings:  settings,
-		tokenHash: sha256.Sum256([]byte(token)),
-		allowCIDR: allowCIDR,
+		settings:      settings,
+		store:         store,
+		publicBaseURL: baseURL,
+		tokenHash:     sha256.Sum256([]byte(token)),
+		allowCIDR:     allowCIDR,
+		nowFn:         func() time.Time { return time.Now().UTC() },
 	}, nil
+}
+
+func (s *AdminServer) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Handler returns the guarded HTTP handler for the Admin API.
@@ -73,6 +99,52 @@ func (s *AdminServer) Handler() http.Handler {
 			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPatch)
 			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+	})
+	mux.HandleFunc("/admin/v1/users", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleListUsers(w, r)
+	})
+	mux.HandleFunc("/admin/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPatch:
+			s.handlePatchUser(w, r)
+		case http.MethodDelete:
+			s.handleDeleteUser(w, r)
+		default:
+			w.Header().Set("Allow", http.MethodPatch+", "+http.MethodDelete)
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
+	mux.HandleFunc("/admin/v1/users/{id}/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.Header().Set("Allow", http.MethodDelete)
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleDeleteUserSessions(w, r)
+	})
+	mux.HandleFunc("/admin/v1/invites", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleListInvites(w, r)
+		case http.MethodPost:
+			s.handleCreateInvite(w, r)
+		default:
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
+	mux.HandleFunc("/admin/v1/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.Header().Set("Allow", http.MethodDelete)
+			writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleDeleteInvite(w, r)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "admin endpoint not found")
@@ -133,12 +205,39 @@ func (s *AdminServer) handleManifest(w http.ResponseWriter, _ *http.Request) {
 	writeAdminJSON(w, http.StatusOK, map[string]any{
 		"service":      adminServiceName,
 		"version":      adminAPIVersion,
-		"capabilities": []string{"settings"},
+		"capabilities": []string{"settings", "users", "invites"},
+		"user_capabilities": map[string]bool{
+			"create":         false,
+			"approve":        false,
+			"toggle_status":  true,
+			"reset_password": false,
+			"change_role":    false,
+			"delete":         true,
+			"sessions":       true,
+			"invites":        true,
+		},
+		"user_columns": []map[string]any{
+			{"key": "active_sessions", "label": "Sessions"},
+			{"key": "last_login_at", "label": "Last Login", "format": "datetime"},
+		},
 		"endpoints": map[string]string{
-			"settings_get":    "GET /admin/v1/settings",
-			"settings_update": "PATCH /admin/v1/settings",
+			"settings_get":         "GET /admin/v1/settings",
+			"settings_update":      "PATCH /admin/v1/settings",
+			"users_list":           "GET /admin/v1/users",
+			"user_update":          "PATCH /admin/v1/users/{id}",
+			"user_delete":          "DELETE /admin/v1/users/{id}",
+			"user_sessions_delete": "DELETE /admin/v1/users/{id}/sessions",
+			"invites_list":         "GET /admin/v1/invites",
+			"invites_create":       "POST /admin/v1/invites",
+			"invite_delete":        "DELETE /admin/v1/invites/{id}",
 		},
 		"settings_schema": []map[string]any{
+			{
+				"key":   "require_auth",
+				"label": "Require Passkey authentication",
+				"type":  "bool",
+				"help":  "When enabled, visitors must sign in with an enrolled Passkey before viewing the UI or downloading audio.",
+			},
 			{
 				"key":   "accept_downloads",
 				"label": "Accept new downloads",
@@ -175,56 +274,290 @@ func (s *AdminServer) handleGetSettings(w http.ResponseWriter, _ *http.Request) 
 	writeAdminJSON(w, http.StatusOK, s.settings.Get())
 }
 
-func (s *AdminServer) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
+func decodeAdminJSONObject(w http.ResponseWriter, r *http.Request, dst any, rejectNulls bool) (int, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeAdminError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
+			return http.StatusRequestEntityTooLarge, errors.New("request body too large")
 		}
-		writeAdminError(w, http.StatusBadRequest, "failed to read request body")
-		return
+		return http.StatusBadRequest, errors.New("failed to read request body")
 	}
 
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		writeAdminError(w, http.StatusBadRequest, "settings patch must be a JSON object")
-		return
+		return http.StatusBadRequest, errors.New("request body must be a JSON object")
 	}
 
-	var patch SettingsPatch
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&patch); err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid settings patch JSON")
-		return
+	if err := dec.Decode(dst); err != nil {
+		return http.StatusBadRequest, errors.New("invalid JSON body")
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		writeAdminError(w, http.StatusBadRequest, "trailing JSON tokens in settings patch")
-		return
+		return http.StatusBadRequest, errors.New("trailing JSON tokens in request body")
 	}
 
-	var rawFields map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &rawFields); err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid settings patch JSON")
-		return
-	}
-	for k, raw := range rawFields {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			writeAdminError(w, http.StatusBadRequest, fmt.Sprintf("%s must not be null", k))
-			return
+	if rejectNulls {
+		var rawFields map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &rawFields); err != nil {
+			return http.StatusBadRequest, errors.New("invalid JSON body")
+		}
+		for k, raw := range rawFields {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				return http.StatusBadRequest, fmt.Errorf("%s must not be null", k)
+			}
 		}
 	}
+	return 0, nil
+}
 
-	updated, err := s.settings.Update(patch)
+func (s *AdminServer) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
+	var patch SettingsPatch
+	if status, err := decodeAdminJSONObject(w, r, &patch, true); err != nil {
+		writeAdminError(w, status, err.Error())
+		return
+	}
+
+	updated, err := s.settings.UpdateContext(r.Context(), patch)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "persist settings:") {
+			writeAdminError(w, http.StatusInternalServerError, "failed to persist settings")
+			return
+		}
 		writeAdminError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, updated)
+}
+
+func (s *AdminServer) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	if statusFilter != "" && statusFilter != UserStatusActive && statusFilter != UserStatusDisabled {
+		writeAdminError(w, http.StatusBadRequest, "invalid status filter (expected active or disabled)")
+		return
+	}
+	users, err := s.store.ListUsers(r.Context(), statusFilter, s.now())
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
+	if users == nil {
+		users = []UserSummary{}
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+type patchUserRequest struct {
+	Status string `json:"status"`
+}
+
+func (s *AdminServer) handlePatchUser(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	userID, err := uuid.Parse(strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	var req patchUserRequest
+	if status, err := decodeAdminJSONObject(w, r, &req, true); err != nil {
+		writeAdminError(w, status, err.Error())
+		return
+	}
+	nextStatus := strings.TrimSpace(req.Status)
+	if nextStatus != UserStatusActive && nextStatus != UserStatusDisabled {
+		writeAdminError(w, http.StatusBadRequest, "status must be active or disabled")
+		return
+	}
+
+	updated, err := s.store.UpdateUserStatus(r.Context(), userID, nextStatus, s.now())
+	if errors.Is(err, ErrNotFound) {
+		writeAdminError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to update user")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, updated)
+}
+
+func (s *AdminServer) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	userID, err := uuid.Parse(strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	if err := s.store.DeleteUser(r.Context(), userID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeAdminError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "failed to delete user")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"id":      userID.String(),
+	})
+}
+
+func (s *AdminServer) handleDeleteUserSessions(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	userID, err := uuid.Parse(strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	revoked, err := s.store.DeleteSessionsByUserID(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeAdminError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "failed to revoke user sessions")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"revoked": revoked,
+		"user_id": userID.String(),
+	})
+}
+
+func (s *AdminServer) handleListInvites(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	records, err := s.store.ListInvites(r.Context())
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to list invites")
+		return
+	}
+	now := s.now()
+	views := make([]InviteView, 0, len(records))
+	for _, inv := range records {
+		views = append(views, inv.View(now))
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"invites": views})
+}
+
+type createInviteRequest struct {
+	DisplayName string `json:"display_name"`
+	TTLHours    *int   `json:"ttl_hours"`
+	CreatedBy   string `json:"created_by"`
+}
+
+func containsControlChar(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *AdminServer) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	var req createInviteRequest
+	if status, err := decodeAdminJSONObject(w, r, &req, true); err != nil {
+		writeAdminError(w, status, err.Error())
+		return
+	}
+
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" || utf8.RuneCountInString(displayName) > maxDisplayNameRune || containsControlChar(displayName) {
+		writeAdminError(w, http.StatusBadRequest, fmt.Sprintf("display_name must be 1..%d printable characters", maxDisplayNameRune))
+		return
+	}
+
+	ttlHours := defaultInviteTTL
+	if req.TTLHours != nil {
+		ttlHours = *req.TTLHours
+	}
+	if ttlHours < minInviteTTLHours || ttlHours > maxInviteTTLHours {
+		writeAdminError(w, http.StatusBadRequest, fmt.Sprintf("ttl_hours must be between %d and %d", minInviteTTLHours, maxInviteTTLHours))
+		return
+	}
+
+	createdBy := strings.TrimSpace(req.CreatedBy)
+	if utf8.RuneCountInString(createdBy) > maxCreatedByRune || containsControlChar(createdBy) {
+		writeAdminError(w, http.StatusBadRequest, fmt.Sprintf("created_by must be at most %d printable characters", maxCreatedByRune))
+		return
+	}
+
+	rawToken, err := newRandomToken()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to generate invite token")
+		return
+	}
+
+	now := s.now()
+	inv := InviteRecord{
+		ID:          uuid.New(),
+		TokenHash:   hashToken(rawToken),
+		DisplayName: displayName,
+		ExpiresAt:   now.Add(time.Duration(ttlHours) * time.Hour),
+		CreatedBy:   createdBy,
+		CreatedAt:   now,
+	}
+	if err := s.store.CreateInvite(r.Context(), inv); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to create invite")
+		return
+	}
+
+	writeAdminJSON(w, http.StatusCreated, map[string]any{
+		"invite":     inv.View(now),
+		"invite_url": s.publicBaseURL + "/invite/" + rawToken,
+	})
+}
+
+func (s *AdminServer) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "database store unavailable")
+		return
+	}
+	inviteID, err := uuid.Parse(strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid invite id")
+		return
+	}
+	if err := s.store.DeleteUnusedInvite(r.Context(), inviteID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeAdminError(w, http.StatusNotFound, "invite not found")
+			return
+		}
+		if errors.Is(err, ErrInviteAlreadyUse) {
+			writeAdminError(w, http.StatusConflict, "cannot revoke an already used invite")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "failed to delete invite")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"id":      inviteID.String(),
+	})
 }
 
 func writeAdminError(w http.ResponseWriter, status int, msg string) {

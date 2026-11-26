@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <title>AuDown — 로그인</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/static/images/app-icon-192.png">
+    <link rel="stylesheet" href="/static/css/index.css">
+</head>
+<body data-auth-page="login">
+    <main class="page-content">
+        <section class="download-card auth-card" aria-labelledby="page-title">
+            <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span>Passkey Sign In</p>
+            <h1 class="brand" id="page-title">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 32 32" focusable="false">
+                        <path d="M16 5v21m-8-8 8 8 8-8"></path>
+                    </svg>
+                </span>
+                <span>AuDown</span>
+            </h1>
+
+            <div class="inapp-banner" id="inapp-banner" role="region" aria-label="브라우저 안내" hidden>
+                <p class="inapp-banner-title">Safari 또는 Chrome에서 열어주세요</p>
+                <p class="inapp-banner-body">카카오톡·네이버·인스타그램 같은 앱 내 브라우저에서는 지문/얼굴 인식(패스키)을 사용할 수 없습니다. 아래 버튼으로 링크를 복사한 뒤 Safari나 Chrome 주소창에 붙여넣어 열어주세요.</p>
+                <button class="inapp-copy-button" id="copy-link-button" type="button">
+                    <span id="copy-link-label">링크 복사</span>
+                    <span aria-hidden="true">⧉</span>
+                </button>
+            </div>
+
+            <p class="form-error" id="auth-error" role="alert" aria-live="assertive" hidden>
+                <svg class="form-error-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 2.5 1.8 20.5c-.5.9.1 1.9 1.1 1.9h18.2c1 0 1.6-1 1.1-1.9L13 2.5c-.5-.9-1.5-.9-2 0Z" fill="#ff0000"></path>
+                    <path d="M12 8v6" stroke="#ffffff" stroke-width="2" stroke-linecap="round"></path>
+                    <circle cx="12" cy="17.5" r="1.1" fill="#ffffff"></circle>
+                </svg>
+                <span class="form-error-message" id="auth-error-message"></span>
+            </p>
+
+            <p class="auth-lead">비밀번호 없이 기기의 지문이나 얼굴 인식으로 바로 로그인하세요.</p>
+
+            <button class="auth-primary-button" id="login-button" type="button">
+                <span id="login-button-label">지문 / 얼굴 인식으로 로그인</span>
+                <span class="button-status" aria-hidden="true">
+                    <span class="button-arrow" id="login-button-arrow">↗</span>
+                    <span class="button-loading-spinner" id="login-button-spinner" hidden></span>
+                </span>
+            </button>
+
+            <p class="auth-footnote">초대 링크를 통해 패스키를 등록한 기기에서만 로그인할 수 있습니다. 새 기기가 필요하면 관리자에게 초대 링크를 요청해주세요.</p>
+        </section>
+    </main>
+    <script type="module" src="/static/js/auth.js"></script>
+</body>
+</html>

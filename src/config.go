@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,21 +15,32 @@ import (
 )
 
 const (
-	DefaultListenAddr = ":8080"
-	DefaultPublicDir  = "public"
-	DefaultAdminPort  = 9090
-	MinAdminTokenLen  = 16
+	DefaultListenAddr    = ":8080"
+	DefaultPublicDir     = "public"
+	DefaultPublicBaseURL = "http://localhost:8080"
+	DefaultAdminPort     = 9090
+	MinAdminTokenLen     = 16
+
+	SessionCookieNameHTTPS = "__Host-audown_session"
+	SessionCookieNameHTTP  = "audown_session"
 )
 
 // Config holds runtime configuration loaded from environment variables.
 type Config struct {
-	ListenAddr     string
-	MainPort       int
-	PublicDir      string
-	AdminPort      int
-	AdminBindCIDR  *netip.Prefix
-	AdminAllowCIDR *netip.Prefix
-	AdminAPIToken  string
+	ListenAddr        string
+	MainPort          int
+	PublicDir         string
+	PublicBaseURL     string
+	RPID              string
+	RPOrigin          string
+	CookieSecure      bool
+	SessionCookieName string
+	DBBrokerURL       string
+	DatabaseURL       string
+	AdminPort         int
+	AdminBindCIDR     *netip.Prefix
+	AdminAllowCIDR    *netip.Prefix
+	AdminAPIToken     string
 }
 
 // LogValue implements slog.LogValuer and redacts secret credentials.
@@ -45,6 +57,12 @@ func (c Config) LogValue() slog.Value {
 		slog.String("listen_addr", c.ListenAddr),
 		slog.Int("main_port", c.MainPort),
 		slog.String("public_dir", c.PublicDir),
+		slog.String("public_base_url", c.PublicBaseURL),
+		slog.String("rp_id", c.RPID),
+		slog.Bool("cookie_secure", c.CookieSecure),
+		slog.Bool("db_broker_configured", c.DBBrokerURL != ""),
+		slog.Bool("database_url_configured", c.DatabaseURL != ""),
+		slog.String("database_url", "[redacted]"),
 		slog.Int("admin_port", c.AdminPort),
 		slog.Bool("admin_api_enabled", c.AdminAPIToken != ""),
 		slog.String("admin_bind_cidr", bindCIDR),
@@ -55,8 +73,8 @@ func (c Config) LogValue() slog.Value {
 
 // String implements fmt.Stringer without exposing secrets.
 func (c Config) String() string {
-	return fmt.Sprintf("Config{ListenAddr:%q AdminPort:%d AdminAPIEnabled:%t}",
-		c.ListenAddr, c.AdminPort, c.AdminAPIToken != "")
+	return fmt.Sprintf("Config{ListenAddr:%q PublicBaseURL:%q RPID:%q AdminPort:%d AdminAPIEnabled:%t DBBroker:%t}",
+		c.ListenAddr, c.PublicBaseURL, c.RPID, c.AdminPort, c.AdminAPIToken != "", c.DBBrokerURL != "")
 }
 
 // LoadConfigFromEnv reads configuration from the process environment.
@@ -82,12 +100,37 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("resolve PUBLIC_DIR_NAME: %w", err)
 	}
 
+	publicBaseRaw := envOrDefault(getenv, "PUBLIC_BASE_URL", DefaultPublicBaseURL)
+	publicBaseURL, rpID, cookieSecure, err := ParsePublicBaseURL(publicBaseRaw)
+	if err != nil {
+		return Config{}, err
+	}
+	sessionCookieName := SessionCookieNameHTTP
+	if cookieSecure {
+		sessionCookieName = SessionCookieNameHTTPS
+	}
+
+	dbBrokerURL := strings.TrimSpace(getenv("DB_BROKER_URL"))
+	if dbBrokerURL != "" {
+		u, err := url.Parse(dbBrokerURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, errors.New("invalid DB_BROKER_URL: expected http:// or https:// URL")
+		}
+	}
+
 	cfg := Config{
-		ListenAddr:    listenAddr,
-		MainPort:      mainPort,
-		PublicDir:     publicDirPath,
-		AdminPort:     DefaultAdminPort,
-		AdminAPIToken: strings.TrimSpace(getenv("ADMIN_API_TOKEN")),
+		ListenAddr:        listenAddr,
+		MainPort:          mainPort,
+		PublicDir:         publicDirPath,
+		PublicBaseURL:     publicBaseURL,
+		RPID:              rpID,
+		RPOrigin:          publicBaseURL,
+		CookieSecure:      cookieSecure,
+		SessionCookieName: sessionCookieName,
+		DBBrokerURL:       dbBrokerURL,
+		DatabaseURL:       strings.TrimSpace(getenv("DATABASE_URL")),
+		AdminPort:         DefaultAdminPort,
+		AdminAPIToken:     strings.TrimSpace(getenv("ADMIN_API_TOKEN")),
 	}
 
 	rawAdminPort := strings.TrimSpace(getenv("ADMIN_PORT"))
@@ -132,6 +175,51 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ParsePublicBaseURL validates and normalizes PUBLIC_BASE_URL into canonical origin,
+// WebAuthn RPID (hostname), and HTTPS secure flag.
+func ParsePublicBaseURL(raw string) (origin string, rpID string, isHTTPS bool, err error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: %w", raw, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: scheme must be http or https", raw)
+	}
+	if u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: must not include userinfo, query, or fragment", raw)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: must not include a subpath", raw)
+	}
+	hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if hostname == "" {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: missing host", raw)
+	}
+	if _, ipErr := netip.ParseAddr(hostname); ipErr == nil {
+		return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: WebAuthn RPID cannot be an IP address (use a hostname such as localhost or audown.cubus.sh)", raw)
+	}
+	port := u.Port()
+	if port != "" {
+		p, pErr := strconv.Atoi(port)
+		if pErr != nil || p < 1 || p > 65535 {
+			return "", "", false, fmt.Errorf("invalid PUBLIC_BASE_URL %q: invalid port", raw)
+		}
+	}
+
+	// Normalize default ports so Origin header matching works strictly.
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" && !((scheme == "https" && port == "443") || (scheme == "http" && port == "80")) {
+		host = net.JoinHostPort(hostname, port)
+	}
+
+	return scheme + "://" + host, hostname, scheme == "https", nil
 }
 
 // ValidatePublicDir ensures the static web root exists and is a directory.

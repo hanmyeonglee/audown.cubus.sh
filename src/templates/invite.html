@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <title>AuDown — 초대 등록</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/static/images/app-icon-192.png">
+    <link rel="stylesheet" href="/static/css/index.css">
+</head>
+<body data-auth-page="invite">
+    <main class="page-content">
+        <section class="download-card auth-card" aria-labelledby="page-title">
+            <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span>Invite Enrollment</p>
+            <h1 class="brand" id="page-title">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 32 32" focusable="false">
+                        <path d="M16 5v21m-8-8 8 8 8-8"></path>
+                    </svg>
+                </span>
+                <span>AuDown</span>
+            </h1>
+
+            {{if .Invalid}}
+            <div class="invite-invalid-box" role="alert">
+                <p class="invite-invalid-title">사용할 수 없는 초대 링크입니다</p>
+                <p class="invite-invalid-body">초대 링크가 만료되었거나 이미 사용되었습니다. 관리자에게 새 초대 링크를 요청해주세요.</p>
+            </div>
+            <a class="auth-secondary-link" href="/login">
+                <span>이미 등록했다면 로그인하기</span>
+                <span aria-hidden="true">↗</span>
+            </a>
+            {{else}}
+            <div class="inapp-banner" id="inapp-banner" role="region" aria-label="브라우저 안내" hidden>
+                <p class="inapp-banner-title">Safari 또는 Chrome에서 열어주세요</p>
+                <p class="inapp-banner-body">카카오톡·네이버·인스타그램 같은 앱 내 브라우저에서는 패스키를 등록할 수 없습니다. 아래 버튼으로 링크를 복사한 뒤 Safari나 Chrome 주소창에 붙여넣어 열어주세요.</p>
+                <button class="inapp-copy-button" id="copy-link-button" type="button">
+                    <span id="copy-link-label">링크 복사</span>
+                    <span aria-hidden="true">⧉</span>
+                </button>
+            </div>
+
+            <div class="invite-recipient">
+                <p class="invite-recipient-label">초대받은 사용자</p>
+                <p class="invite-recipient-name">{{.DisplayName}}</p>
+            </div>
+
+            <p class="form-error" id="auth-error" role="alert" aria-live="assertive" hidden>
+                <svg class="form-error-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 2.5 1.8 20.5c-.5.9.1 1.9 1.1 1.9h18.2c1 0 1.6-1 1.1-1.9L13 2.5c-.5-.9-1.5-.9-2 0Z" fill="#ff0000"></path>
+                    <path d="M12 8v6" stroke="#ffffff" stroke-width="2" stroke-linecap="round"></path>
+                    <circle cx="12" cy="17.5" r="1.1" fill="#ffffff"></circle>
+                </svg>
+                <span class="form-error-message" id="auth-error-message"></span>
+            </p>
+
+            <p class="auth-lead">버튼을 눌러 이 기기의 지문이나 얼굴 인식(패스키)을 등록하면 바로 시작할 수 있습니다.</p>
+
+            <button class="auth-primary-button" id="register-button" type="button">
+                <span id="register-button-label">이 기기로 시작하기 (패스키 등록)</span>
+                <span class="button-status" aria-hidden="true">
+                    <span class="button-arrow" id="register-button-arrow">↗</span>
+                    <span class="button-loading-spinner" id="register-button-spinner" hidden></span>
+                </span>
+            </button>
+
+            <p class="auth-footnote">이 초대 링크는 1회용입니다. 등록을 완료하면 다음부터는 아이디·비밀번호 없이 한 번에 로그인됩니다.</p>
+            {{end}}
+        </section>
+    </main>
+    {{if not .Invalid}}
+    <script type="module" src="/static/js/auth.js"></script>
+    {{end}}
+</body>
+</html>

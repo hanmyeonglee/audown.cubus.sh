@@ -693,3 +693,240 @@ button:focus-visible {
         gap: 10px;
     }
 }
+
+.card-top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 24px;
+}
+
+.card-top-bar .eyebrow {
+    margin: 0;
+}
+
+.is-offline .card-top-bar {
+    display: none;
+}
+
+.auth-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    font-size: 12px;
+}
+
+.auth-bar[hidden] {
+    display: none !important;
+}
+
+.auth-user {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 800;
+    color: #000000;
+}
+
+.auth-logout-button {
+    padding: 4px 10px;
+    border: 1px solid #000000;
+    border-radius: 0;
+    background: #ffffff;
+    color: #000000;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.auth-logout-button:hover:not(:disabled) {
+    background: #000000;
+    color: #ffffff;
+}
+
+.auth-logout-button:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.auth-card .brand {
+    margin-bottom: 24px;
+}
+
+.auth-lead {
+    margin: 0 0 24px;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.6;
+    color: #111111;
+}
+
+.auth-footnote {
+    margin: 20px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #555555;
+}
+
+.auth-primary-button {
+    width: 100%;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 20px;
+    border: 1px solid #ff0000;
+    border-radius: 0;
+    color: #ffffff;
+    background: #ff0000;
+    font: inherit;
+    font-size: 15px;
+    font-weight: 850;
+    text-align: left;
+    cursor: pointer;
+}
+
+.auth-primary-button:not(:disabled):hover {
+    border-color: #000000;
+    background: #000000;
+    color: #ffffff;
+}
+
+.auth-primary-button:disabled {
+    border-color: #888888;
+    background: #888888;
+    color: #ffffff;
+    cursor: not-allowed;
+}
+
+.auth-secondary-link {
+    width: 100%;
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    border: 1px solid #000000;
+    color: #000000;
+    background: #ffffff;
+    font-size: 14px;
+    font-weight: 800;
+    text-decoration: none;
+}
+
+.auth-secondary-link:hover {
+    background: #000000;
+    color: #ffffff;
+}
+
+.invite-recipient {
+    margin: 0 0 20px;
+    padding: 16px 18px;
+    border: 1px solid #000000;
+    background: #fafafa;
+}
+
+.invite-recipient-label {
+    margin: 0 0 4px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    color: #ff0000;
+}
+
+.invite-recipient-name {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 900;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+
+.invite-invalid-box {
+    margin: 0 0 24px;
+    padding: 18px;
+    border: 1px solid #ff0000;
+    background: #fff8f8;
+}
+
+.invite-invalid-title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 900;
+    color: #ff0000;
+}
+
+.invite-invalid-body {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #111111;
+}
+
+.inapp-banner {
+    margin: 0 0 24px;
+    padding: 16px 18px;
+    border: 2px solid #000000;
+    background: #fff7e6;
+}
+
+.inapp-banner[hidden] {
+    display: none !important;
+}
+
+.inapp-banner-title {
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 900;
+    color: #000000;
+}
+
+.inapp-banner-body {
+    margin: 0 0 14px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #222222;
+}
+
+.inapp-copy-button {
+    width: 100%;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border: 1px solid #000000;
+    border-radius: 0;
+    background: #000000;
+    color: #ffffff;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.inapp-copy-button:hover {
+    background: #ff0000;
+    border-color: #ff0000;
+}
+
+.sr-copy-buffer {
+    position: fixed;
+    top: -9999px;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+@media (max-width: 600px) {
+    .auth-user {
+        max-width: 110px;
+    }
+}
